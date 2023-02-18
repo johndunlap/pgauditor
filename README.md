@@ -3,9 +3,10 @@ Assortment of plpgsql functions which can generate tables plpgsql functions for 
 
 ## Available functions
 
-| Function        | Description                                  |                                 
-|-----------------|----------------------------------------------|
-| pgaudit_create  | creates an audit table and starts auditing   |
-| pgaudit_update  | adds columns to audit table if necessary     |
-| pgaudit_drop    | ceases auditing and drops the audit table    |
-| pgaudit_disable | ceases auditing but leaves audit table alone |
+| Function              | Description                                                                                                                                                                        |                                 
+|-----------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| pgaudit_create(text)  | Accepts a table name as an argument and outputs SQL for creating an audit table and audit triggers for the given table                                                             |
+| pgaudit_update(text)  | Accepts a table name as an argument and outputs SQL for adding columns to the audit table if there are any new columns in the given table which should be added to the audit table |
+| pgaudit_drop(text)    | Accepts a table name as an argument and outputs SQL for dropping the audit table and audit triggers for the given table                                                            |
+| pgaudit_disable(text) | Accepts a table name as an argument and outputs SQL for dropping the audit triggers for the given table. This assumes that the given table is already audited.                     |
+| pgaudit_enable(text)  | Accepts a table name as an argument and outputs SQL for creating audit triggers for the given table. This assumes that the given table is already audited.                         |
