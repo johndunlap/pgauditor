@@ -1,5 +1,5 @@
 # pg-audit
-This project consists of a single sql file which contains plpgsql functions which generate plpgsql functions and audit tables for capturing changes to PostgreSQL database tables.
+This project consists of a single sql file which contains plpgsql functions which generate plpgsql functions and audit tables for capturing changes made to PostgreSQL database tables.
 
 ## Available functions
 
