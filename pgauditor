@@ -68,6 +68,26 @@ EOF
 
 # Create utility functions
 cat <<'EOF'
+CREATE OR REPLACE FUNCTION empty(s text) RETURNS BOOLEAN
+LANGUAGE plpgsql
+AS
+$BODY$
+DECLARE
+BEGIN
+    RETURN s IS NULL OR TRIM(s) = '';
+END;
+$BODY$ VOLATILE;
+
+CREATE OR REPLACE FUNCTION empty(s varchar) RETURNS BOOLEAN
+LANGUAGE plpgsql
+AS
+$BODY$
+DECLARE
+BEGIN
+    RETURN s IS NULL OR TRIM(s) = '';
+END;
+$BODY$ VOLATILE;
+
 CREATE OR REPLACE FUNCTION get_current_setting(name text) RETURNS TEXT
 LANGUAGE plpgsql
 AS $BODY$
@@ -79,7 +99,7 @@ BEGIN
 EXCEPTION WHEN OTHERS THEN
     RETURN NULL;
 END;
-$BODY$;
+$BODY$ VOLATILE;
 
 CREATE OR REPLACE FUNCTION is_different(boolean, boolean)
 	RETURNS boolean
@@ -95,7 +115,7 @@ BEGIN
 
 	return false;
 END;
-$BODY$;
+$BODY$ VOLATILE;
 
 CREATE OR REPLACE FUNCTION is_different(bigint, bigint)
 	RETURNS boolean
@@ -111,7 +131,7 @@ BEGIN
 
 	return false;
 END;
-$BODY$;
+$BODY$ VOLATILE;
 
 CREATE OR REPLACE FUNCTION is_different(integer, integer)
 	RETURNS boolean
@@ -127,7 +147,7 @@ BEGIN
 
 	return false;
 END;
-$BODY$;
+$BODY$ VOLATILE;
 
 CREATE OR REPLACE FUNCTION is_different(character varying, character varying)
 	RETURNS boolean
@@ -143,7 +163,7 @@ BEGIN
 
 	return false;
 END;
-$BODY$;
+$BODY$ VOLATILE;
 
 CREATE OR REPLACE FUNCTION is_different(timestamp without time zone, timestamp without time zone)
 	RETURNS boolean
@@ -159,7 +179,7 @@ BEGIN
 
 	return false;
 END;
-$BODY$;
+$BODY$ VOLATILE;
 
 CREATE OR REPLACE FUNCTION is_different(timestamp with time zone, timestamp with time zone)
 	RETURNS boolean
@@ -175,7 +195,7 @@ BEGIN
 
 	return false;
 END;
-$BODY$;
+$BODY$ VOLATILE;
 
 CREATE OR REPLACE FUNCTION is_different(numeric, numeric)
 	RETURNS boolean
@@ -191,7 +211,7 @@ BEGIN
 
 	return false;
 END;
-$BODY$;
+$BODY$ VOLATILE;
 EOF
 
 echo
@@ -206,9 +226,10 @@ EOF
 
 echo
 
-# Create main audit sequence
+# Create main audit sequence and the operation type enum
 cat <<'EOF'
 CREATE SEQUENCE IF NOT EXISTS main_audit_seq;
+CREATE TYPE pgauditor_operation AS ENUM ('INSERT', 'UPDATE', 'DELETE');
 EOF
 
 # Determine if the audit table exists in Postgresql by audit table name
@@ -233,7 +254,8 @@ if [ ${AUDIT_TABLE_EXISTS} -eq 0 ]; then
     AND column_name not in(
       'audit_id',
       'changed_by',
-      'changed_at'
+      'changed_at',
+      'operation'
     )
   ORDER BY ordinal_position
 EOF
@@ -262,6 +284,7 @@ else
 cat <<EOF
 CREATE TABLE IF NOT EXISTS ${AUDIT_TABLE_NAME}(
   audit_id bigint NOT NULL DEFAULT nextval('main_audit_seq')
+  ,operation pgauditor_operation
   ,changed_by text
   ,changed_at timestamp with time zone
 EOF
@@ -292,6 +315,7 @@ $BODY$
 DECLARE
   changed_by_var text := NULL;
   changed_at_var timestamp with time zone := current_timestamp;
+  operation_var pgauditor_operation := NULL;
 EOF
 
 # Emit variables for both old and new values
@@ -309,13 +333,14 @@ done < "${COLUMN_TMP_FILE}"
 cat <<EOF
 	change_count INT := 0;
 BEGIN
-  changed_by_var = get_current_setting('pgaudit.current_user');
+  operation_var=TG_OP::pgauditor_operation;
+  select into changed_by_var get_current_setting('pgauditor.current_user');
 
-  IF changed_by_var IS NULL THEN
-    RAISE EXCEPTION 'Anonymous updates are not permitted for audited table ${TABLE}. To identify the user making the change run: SET [LOCAL] pgaudit.current_user TO <user>';
+  IF empty(changed_by_var) = true THEN
+    RAISE EXCEPTION 'Anonymous updates are not permitted for audited table ${TABLE}. To identify the user making the change run: SET [LOCAL] "pgauditor.current_user"=<user>';
   END IF;
 
-  IF (TG_OP = 'UPDATE') THEN
+  IF (operation_var = 'UPDATE') THEN
 EOF
 
 # Iterate through the columns
@@ -324,15 +349,20 @@ while IFS= read -r line; do
     BEGIN{
       FS="|";
     }{
-      print "    old_" $1 "_var := OLD." $1 ";";
-      print "    new_" $1 "_var := NEW." $1 ";"
+      old_name="OLD." $1;
+      new_name="NEW." $1;
+
+      print "    IF is_different(" old_name ", " new_name ") = true THEN";
+      print "      old_" $1 "_var := OLD." $1 ";";
+      print "      new_" $1 "_var := NEW." $1 ";"
+      print "      change_count := change_count + 1;"
+      print "    END IF;"
     }
   '
 done < "${COLUMN_TMP_FILE}"
 
 cat <<EOF
-    change_count := change_count + 1;
-  ELSIF (TG_OP = 'INSERT') THEN
+  ELSIF (operation_var = 'INSERT') THEN
 EOF
 
 # Iterate through the columns
@@ -348,7 +378,7 @@ done < "${COLUMN_TMP_FILE}"
 
 cat <<EOF
     change_count := change_count + 1;
-  ELSIF (TG_OP = 'DELETE') THEN
+  ELSIF (operation_var = 'DELETE') THEN
 EOF
 
 # Iterate through the columns
@@ -364,13 +394,16 @@ done < "${COLUMN_TMP_FILE}"
 
 cat <<EOF
     change_count := change_count + 1;
+  ELSE
+    raise exception 'Unknown operation: %', operation_var;
   END IF;
 
   IF change_count > 0 THEN
     INSERT INTO ${AUDIT_TABLE_NAME}(
       audit_id
-      ,changed_by_username
-      ,changed_at_var
+      ,operation
+      ,changed_by
+      ,changed_at
 EOF
 
 # Iterate through the columns
@@ -388,6 +421,7 @@ done < "${COLUMN_TMP_FILE}"
 cat <<EOF
     ) values(
       nextval('main_audit_seq')
+      ,operation_var
       ,changed_by_var
       ,changed_at_var
 EOF
