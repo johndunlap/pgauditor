@@ -1,0 +1,421 @@
+#!/bin/bash
+
+# =============================================================================
+# pg-audit
+# Copyright (C) 2023 John Dunlap<john.david.dunlap@gmail.com>
+# =============================================================================
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+#
+# =============================================================================
+# Set connection parameters by defining the following environment variables:
+# https://www.postgresql.org/docs/current/libpq-envars.html
+# PGHOST
+# PGPORT
+# PGDATABASE
+# PGUSER
+# PGPASSWORD
+#
+# =============================================================================
+
+TABLE=$1
+
+# Check for required parameters
+if [ -z "$TABLE" ]; then
+    echo "Usage: $0 <table>"
+    exit 1
+fi
+
+# Verify that the table exists in PostgreSQL
+psql -c "SELECT 1 FROM ${TABLE} LIMIT 1" > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+    echo "Table ${TABLE} does not exist"
+    exit 1
+fi
+
+AUDIT_TABLE_NAME="aud_${TABLE}"
+
+# Create a temporary file for storing the column metadata so that we can use it multiple times
+COLUMN_TMP_FILE=$(mktemp)
+
+# Register a trap to delete the temporary file on exit
+trap 'rm -f "$COLUMN_TMP_FILE"' EXIT
+
+# Cache column names and types in a temporary file
+psql -t <<EOF | sed '/^$/d' | sed 's/^ //g' | tr -s ' ' | sed 's/ | /|/g' > "${COLUMN_TMP_FILE}"
+SELECT
+    column_name,
+    data_type
+FROM information_schema.columns
+WHERE table_name = '${TABLE}'
+ORDER BY ordinal_position
+EOF
+
+# Create utility functions
+cat <<'EOF'
+CREATE OR REPLACE FUNCTION get_current_setting(name text) RETURNS TEXT
+LANGUAGE plpgsql
+AS $BODY$
+DECLARE
+    value text;
+BEGIN
+    SELECT INTO value current_setting(NAME);
+        RETURN value;
+EXCEPTION WHEN OTHERS THEN
+    RETURN NULL;
+END;
+$BODY$;
+
+CREATE OR REPLACE FUNCTION is_different(boolean, boolean)
+	RETURNS boolean
+LANGUAGE plpgsql
+AS $BODY$
+DECLARE
+	a ALIAS FOR $1;
+	b ALIAS FOR $2;
+BEGIN
+	if ((a IS NULL and b IS NOT NULL) or (a IS NOT NULL and b IS NULL) or (a != b)) THEN
+		return true;
+	END IF;
+
+	return false;
+END;
+$BODY$;
+
+CREATE OR REPLACE FUNCTION is_different(bigint, bigint)
+	RETURNS boolean
+LANGUAGE plpgsql
+AS $BODY$
+DECLARE
+	a ALIAS FOR $1;
+	b ALIAS FOR $2;
+BEGIN
+	if ((a IS NULL and b IS NOT NULL) or (a IS NOT NULL and b IS NULL) or (a != b)) THEN
+		return true;
+	END IF;
+
+	return false;
+END;
+$BODY$;
+
+CREATE OR REPLACE FUNCTION is_different(integer, integer)
+	RETURNS boolean
+LANGUAGE plpgsql
+AS $BODY$
+DECLARE
+	a ALIAS FOR $1;
+	b ALIAS FOR $2;
+BEGIN
+	if ((a IS NULL and b IS NOT NULL) or (a IS NOT NULL and b IS NULL) or (a != b)) THEN
+		return true;
+	END IF;
+
+	return false;
+END;
+$BODY$;
+
+CREATE OR REPLACE FUNCTION is_different(character varying, character varying)
+	RETURNS boolean
+LANGUAGE plpgsql
+AS $BODY$
+DECLARE
+	a ALIAS FOR $1;
+	b ALIAS FOR $2;
+BEGIN
+	if ((a IS NULL and b IS NOT NULL) or (a IS NOT NULL and b IS NULL) or (a != b)) THEN
+		return true;
+	END IF;
+
+	return false;
+END;
+$BODY$;
+
+CREATE OR REPLACE FUNCTION is_different(timestamp without time zone, timestamp without time zone)
+	RETURNS boolean
+LANGUAGE plpgsql
+AS $BODY$
+DECLARE
+	a ALIAS FOR $1;
+	b ALIAS FOR $2;
+BEGIN
+	if ((a IS NULL and b IS NOT NULL) or (a IS NOT NULL and b IS NULL) or (a != b)) THEN
+		return true;
+	END IF;
+
+	return false;
+END;
+$BODY$;
+
+CREATE OR REPLACE FUNCTION is_different(timestamp with time zone, timestamp with time zone)
+	RETURNS boolean
+LANGUAGE plpgsql
+AS $BODY$
+DECLARE
+	a ALIAS FOR $1;
+	b ALIAS FOR $2;
+BEGIN
+	if ((a IS NULL and b IS NOT NULL) or (a IS NOT NULL and b IS NULL) or (a != b)) THEN
+		return true;
+	END IF;
+
+	return false;
+END;
+$BODY$;
+
+CREATE OR REPLACE FUNCTION is_different(numeric, numeric)
+	RETURNS boolean
+LANGUAGE plpgsql
+AS $BODY$
+DECLARE
+	a ALIAS FOR $1;
+	b ALIAS FOR $2;
+BEGIN
+	if ((a IS NULL and b IS NOT NULL) or (a IS NOT NULL and b IS NULL) or (a != b)) THEN
+		return true;
+	END IF;
+
+	return false;
+END;
+$BODY$;
+EOF
+
+echo
+
+# Drop existing trigger definitions if they exist
+cat <<EOF
+DROP TRIGGER IF EXISTS ${TABLE}_aud_insert_trigger ON ${TABLE};
+DROP TRIGGER IF EXISTS ${TABLE}_aud_update_trigger ON ${TABLE};
+DROP TRIGGER IF EXISTS ${TABLE}_aud_delete_trigger ON ${TABLE};
+DROP FUNCTION IF EXISTS audit_${TABLE}_changes();
+EOF
+
+echo
+
+# Create main audit sequence
+cat <<'EOF'
+CREATE SEQUENCE IF NOT EXISTS main_audit_seq;
+EOF
+
+# Determine if the audit table exists in Postgresql by audit table name
+psql -c "SELECT 1 FROM ${AUDIT_TABLE_NAME} LIMIT 1" > /dev/null 2>&1
+AUDIT_TABLE_EXISTS=$?
+
+if [ ${AUDIT_TABLE_EXISTS} -eq 0 ]; then
+  # Add missing columns to existing audit table
+  AUDIT_TABLE_COLUMNS=$(mktemp)
+  
+  # Register a trap to delete the temporary file on exit
+  trap 'rm -f "$AUDIT_TABLE_COLUMNS"' EXIT
+  
+  # Cache column names and types in a temporary file
+  psql -t <<EOF | sed '/^$/d' | sed 's/^ //g' | tr -s ' ' | sed 's/ | /|/g' > "${AUDIT_TABLE_COLUMNS}"
+  SELECT
+      replace(column_name, 'new_', ''),
+      data_type
+  FROM information_schema.columns
+  WHERE table_name = '${AUDIT_TABLE_NAME}'
+    AND column_name not like 'old_%'
+    AND column_name not in(
+      'audit_id',
+      'changed_by',
+      'changed_at'
+    )
+  ORDER BY ordinal_position
+EOF
+
+  # Add columns to the existing audit table if they do not already exist
+  while IFS= read -r line; do
+    # Continue to the next row if the column starts with old_
+    if [[ "${line}" == old_* ]]; then
+      continue
+    fi
+
+    grep "${line}" "${AUDIT_TABLE_COLUMNS}"> /dev/null 2>&1
+    if [ $? -ne 0 ];then
+      echo "${line}" | awk -v AUDIT_TABLE_NAME="${AUDIT_TABLE_NAME}" '
+        BEGIN{
+          FS="|";
+        }{
+          print "ALTER TABLE " AUDIT_TABLE_NAME " ADD COLUMN old_" $1 " " $2 ";";
+          print "ALTER TABLE " AUDIT_TABLE_NAME " ADD COLUMN new_" $1 " " $2 ";";
+        }
+      ' | cat
+    fi
+  done < "${COLUMN_TMP_FILE}"
+else
+  # Create audit table
+cat <<EOF
+CREATE TABLE IF NOT EXISTS ${AUDIT_TABLE_NAME}(
+  audit_id bigint NOT NULL DEFAULT nextval('main_audit_seq')
+  ,changed_by text
+  ,changed_at timestamp with time zone
+EOF
+  # Iterate through the columns
+  while IFS= read -r line; do
+    echo $line | awk '
+      BEGIN{
+        FS="|";
+      }{
+        print "  ,old_" $1 " " $2;
+        print "  ,new_" $1 " " $2
+        }
+      '
+  done < "${COLUMN_TMP_FILE}"
+
+  echo ");"
+fi
+
+echo
+
+# Create trigger function
+cat <<EOF
+CREATE OR REPLACE FUNCTION audit_${TABLE}_changes() RETURNS TRIGGER
+AS
+EOF
+cat <<'EOF'
+$BODY$
+DECLARE
+  changed_by_var text := NULL;
+  changed_at_var timestamp with time zone := current_timestamp;
+EOF
+
+# Emit variables for both old and new values
+while IFS= read -r line; do
+  echo $line | awk '
+    BEGIN{
+      FS="|";
+    }{
+      print "  old_" $1 "_var " $2 " := NULL;";
+      print "  new_" $1 "_var " $2" := NULL;"
+      }
+    '
+done < "${COLUMN_TMP_FILE}"
+
+cat <<EOF
+	change_count INT := 0;
+BEGIN
+  changed_by_var = get_current_setting('pgaudit.current_user');
+
+  IF changed_by_var IS NULL THEN
+    RAISE EXCEPTION 'Anonymous updates are not permitted for audited table ${TABLE}. To identify the user making the change run: SET [LOCAL] pgaudit.current_user TO <user>';
+  END IF;
+
+  IF (TG_OP = 'UPDATE') THEN
+EOF
+
+# Iterate through the columns
+while IFS= read -r line; do
+  echo $line | awk '
+    BEGIN{
+      FS="|";
+    }{
+      print "    old_" $1 "_var := OLD." $1 ";";
+      print "    new_" $1 "_var := NEW." $1 ";"
+    }
+  '
+done < "${COLUMN_TMP_FILE}"
+
+cat <<EOF
+    change_count := change_count + 1;
+  ELSIF (TG_OP = 'INSERT') THEN
+EOF
+
+# Iterate through the columns
+while IFS= read -r line; do
+  echo $line | awk '
+    BEGIN{
+      FS="|";
+    }{
+      print "    new_" $1 "_var := NEW." $1 ";"
+    }
+  '
+done < "${COLUMN_TMP_FILE}"
+
+cat <<EOF
+    change_count := change_count + 1;
+  ELSIF (TG_OP = 'DELETE') THEN
+EOF
+
+# Iterate through the columns
+while IFS= read -r line; do
+  echo $line | awk '
+    BEGIN{
+      FS="|";
+    }{
+      print "    old_" $1 "_var := OLD." $1 ";"
+    }
+  '
+done < "${COLUMN_TMP_FILE}"
+
+cat <<EOF
+    change_count := change_count + 1;
+  END IF;
+
+  IF change_count > 0 THEN
+    INSERT INTO ${AUDIT_TABLE_NAME}(
+      audit_id
+      ,changed_by_username
+      ,changed_at_var
+EOF
+
+# Iterate through the columns
+while IFS= read -r line; do
+  echo $line | awk '
+    BEGIN{
+      FS="|";
+    }{
+      print "      ,old_" $1;
+      print "      ,new_" $1;
+    }
+  '
+done < "${COLUMN_TMP_FILE}"
+
+cat <<EOF
+    ) values(
+      nextval('main_audit_seq')
+      ,changed_by_var
+      ,changed_at_var
+EOF
+
+# Iterate through the columns
+while IFS= read -r line; do
+  echo $line | awk '
+    BEGIN{
+      FS="|";
+    }{
+      print "      ,old_" $1 "_var";
+      print "      ,new_" $1 "_var";
+    }
+  '
+done < "${COLUMN_TMP_FILE}"
+
+cat <<'EOF'
+    );
+  END IF;
+  RETURN NULL;
+END;
+$BODY$
+LANGUAGE plpgsql VOLATILE;
+EOF
+
+# Create trigger definitions
+cat <<EOF
+CREATE TRIGGER ${AUDIT_TABLE_NAME}_insert_trigger AFTER INSERT ON ${TABLE} FOR EACH ROW EXECUTE PROCEDURE audit_${TABLE}_changes();
+CREATE TRIGGER ${AUDIT_TABLE_NAME}_update_trigger AFTER UPDATE ON ${TABLE} FOR EACH ROW EXECUTE PROCEDURE audit_${TABLE}_changes();
+CREATE TRIGGER ${AUDIT_TABLE_NAME}_delete_trigger AFTER DELETE ON ${TABLE} FOR EACH ROW EXECUTE PROCEDURE audit_${TABLE}_changes();
+EOF
