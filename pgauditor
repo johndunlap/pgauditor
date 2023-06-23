@@ -33,11 +33,59 @@
 #
 # =============================================================================
 
-TABLE=$1
+# Process command-line options using getopt
+OPTIONS="t:vh"
+LONGOPTS="table:,version,help"
+
+# Parse the options and store them in variables
+PARSED_OPTIONS=$(getopt -n "$0" -o "$OPTIONS" --long "$LONGOPTS" -- "$@")
+if [ $? -ne 0 ]; then
+    exit 1
+fi
+eval set -- "$PARSED_OPTIONS"
+
+# Default values
+VERSION="1.0"
+
+# Define help message so that we can use it during validation
+HELP=$(cat<<EOF
+Usage: $(basename $0) [OPTIONS]
+Options:
+  -t, --table   <table>       Specify the table which should be audited
+  -v, --version               Print $(basename $0) version and exit
+  -h, --help                  Print this help message and exit
+EOF
+)
+
+# Process the parsed options
+while true; do
+    case "$1" in
+        -t | --table)
+            TABLE="$2"
+            shift 2
+            ;;
+        -v | --version)
+            echo "${VERSION}"
+            exit 0
+            ;;
+        -h | --help)
+            echo "${HELP}"
+            exit 0
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            echo "Internal error!"
+            exit 1
+            ;;
+    esac
+done
 
 # Check for required parameters
 if [ -z "$TABLE" ]; then
-    echo "Usage: $0 <table>"
+    echo "${HELP}"
     exit 1
 fi
 
@@ -45,7 +93,7 @@ fi
 psql -c "SELECT 1 FROM ${TABLE} LIMIT 1" > /dev/null 2>&1
 if [ $? -ne 0 ]; then
     echo "Table ${TABLE} does not exist"
-    exit 1
+    exit 2
 fi
 
 AUDIT_TABLE_NAME="aud_${TABLE}"
