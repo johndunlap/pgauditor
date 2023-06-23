@@ -66,6 +66,13 @@ WHERE table_name = '${TABLE}'
 ORDER BY ordinal_position
 EOF
 
+# Create a generic temporary file
+TMP_FILE=$(mktemp)
+
+# Register a trap to delete the temporary file on exit
+trap 'rm -f "$TMP_FILE"' EXIT
+
+
 # Create utility functions
 cat <<'EOF'
 CREATE OR REPLACE FUNCTION empty(s text) RETURNS BOOLEAN
@@ -218,19 +225,41 @@ echo
 
 # Drop existing trigger definitions if they exist
 cat <<EOF
-DROP TRIGGER IF EXISTS ${TABLE}_aud_insert_trigger ON ${TABLE};
-DROP TRIGGER IF EXISTS ${TABLE}_aud_update_trigger ON ${TABLE};
-DROP TRIGGER IF EXISTS ${TABLE}_aud_delete_trigger ON ${TABLE};
+DROP TRIGGER IF EXISTS ${AUDIT_TABLE_NAME}_insert_trigger ON ${TABLE};
+DROP TRIGGER IF EXISTS ${AUDIT_TABLE_NAME}_update_trigger ON ${TABLE};
+DROP TRIGGER IF EXISTS ${AUDIT_TABLE_NAME}_delete_trigger ON ${TABLE};
 DROP FUNCTION IF EXISTS audit_${TABLE}_changes();
 EOF
 
 echo
 
-# Create main audit sequence and the operation type enum
-cat <<'EOF'
-CREATE SEQUENCE IF NOT EXISTS main_audit_seq;
-CREATE TYPE pgauditor_operation AS ENUM ('INSERT', 'UPDATE', 'DELETE');
+psql -t <<EOF > "${TMP_FILE}"
+  SELECT EXISTS (
+      SELECT 1
+      FROM pg_sequences
+      WHERE sequencename = 'main_audit_seq'
+  );
 EOF
+SEQUENCE_EXISTS=$(cat "${TMP_FILE}" | sed 's/[ \n]*//g')
+
+if [ "f" == "${SEQUENCE_EXISTS}" ]; then
+  echo "CREATE SEQUENCE IF NOT EXISTS main_audit_seq;"
+fi
+
+psql -t <<EOF > "${TMP_FILE}"
+SELECT EXISTS (
+   SELECT 1
+   FROM pg_type
+   WHERE typname = 'pgauditor_operation'
+   AND typtype = 'e'
+);
+EOF
+ENUM_EXISTS=$(cat "${TMP_FILE}" | sed 's/[ \n]*//g')
+
+# Create main audit sequence and the operation type enum
+if [ "f" == "${ENUM_EXISTS}" ]; then
+  echo "CREATE TYPE pgauditor_operation AS ENUM ('INSERT', 'UPDATE', 'DELETE');"
+fi
 
 # Determine if the audit table exists in Postgresql by audit table name
 psql -c "SELECT 1 FROM ${AUDIT_TABLE_NAME} LIMIT 1" > /dev/null 2>&1
