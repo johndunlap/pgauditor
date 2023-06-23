@@ -242,6 +242,7 @@ psql -t <<EOF > "${TMP_FILE}"
 EOF
 SEQUENCE_EXISTS=$(cat "${TMP_FILE}" | sed 's/[ \n]*//g')
 
+# Create main audit sequence if it does not already exist
 if [ "f" == "${SEQUENCE_EXISTS}" ]; then
   echo "CREATE SEQUENCE IF NOT EXISTS main_audit_seq;"
 fi
@@ -256,7 +257,7 @@ SELECT EXISTS (
 EOF
 ENUM_EXISTS=$(cat "${TMP_FILE}" | sed 's/[ \n]*//g')
 
-# Create main audit sequence and the operation type enum
+# Create the operation type enum if it does not already exist
 if [ "f" == "${ENUM_EXISTS}" ]; then
   echo "CREATE TYPE pgauditor_operation AS ENUM ('INSERT', 'UPDATE', 'DELETE');"
 fi
