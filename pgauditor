@@ -43,8 +43,8 @@
 # =============================================================================
 
 # Process command-line options using getopt
-OPTIONS="t:a:vh"
-LONGOPTS="table:,auth:,version,help"
+OPTIONS="t:a:m:vh"
+LONGOPTS="table:,auth:,mode:,version,help"
 
 # Parse the options and store them in variables
 PARSED_OPTIONS=$(getopt -n "$0" -o "$OPTIONS" --long "$LONGOPTS" -- "$@")
@@ -54,17 +54,22 @@ if [ $? -ne 0 ]; then
 fi
 eval set -- "$PARSED_OPTIONS"
 
-# Default values
+# TODO: Automate the setting of this version number
 VERSION="1.0"
+
+# These values have been selected as the defaults because they are the most
+# common use cases and because they are the easiest for the user to implement
+# in their application.
 AUTH_TYPE="user"
+MODE="all"
 
 # Define help message so that we can use it during validation
 HELP=$(cat<<EOF
 Usage: $(basename $0) [OPTIONS]
 Options:
-  -t, --table  <table>         Specify the table which should be audited. This
+  -t, --table=TABLE            Specify the table which should be audited. This
                                option is required.
-  -a, --auth   [set|user|anon] The mechanism used to determine the current
+  -a, --auth=[set|user|anon]   The mechanism used to determine the current
                                user. The set authentication type uses the
                                values of a configuration parameter to determine
                                the current user. The advantage of the set
@@ -78,7 +83,21 @@ Options:
                                to ensure accurate reporting. The user
                                authentication type captures the current
                                database username. The anon option does not
-                               require authentication. The default value is user.
+                               require authentication. The default value is
+                               user.
+  -m, --mode=[all|changed]     In "all" mode, the full row will be captured in
+                               the audit table regardless of how many columns
+                               were modified. In "changed" made, only the columns
+                               which have changed will be captured in the audit
+                               table. The benefits of only capturing values
+                               which have changed are that the audit table
+                               takes up less space on disk and it is easier
+                               to identify what has been changed. The drawback
+                               is that it is more difficult to get a complete
+                               snapshot of the row when the change occurred if
+                               everything in the audit table is null except for
+                               the value(s) which changed. The default is "all"
+                               mode.
   -v, --version                Print $(basename $0) version and exit
   -h, --help                   Print this help message and exit
 EOF
@@ -93,6 +112,10 @@ while true; do
             ;;
         -a | --auth)
             AUTH_TYPE="$2"
+            shift 2
+            ;;
+        -m | --mode)
+            MODE="$2"
             shift 2
             ;;
         -v | --version)
@@ -116,7 +139,7 @@ done
 
 # Check for required parameters
 if [ -z "$TABLE" ]; then
-    >&2 echo "${HELP}"
+    >&2 echo "Table name is required"
     exit 2
 fi
 
@@ -131,6 +154,12 @@ fi
 if [ "${AUTH_TYPE}" != "set" ] && [ "${AUTH_TYPE}" != "user" ] && [ "${AUTH_TYPE}" != "anon" ]; then
     >&2 echo "Unknown auth type: ${AUTH_TYPE}. Supported auth types are set, user, and anon"
     exit 4
+fi
+
+#Verify that the mode is known and supported
+if [ "${MODE}" != "all" ] && [ "${MODE}" != "changed" ]; then
+    >&2 echo "Unknown mode: ${MODE}. Supported modes are all and changed"
+    exit 6
 fi
 
 AUDIT_TABLE_NAME="aud_${TABLE}"
@@ -292,7 +321,7 @@ else
   # Create audit table
 cat <<EOF
 CREATE TABLE IF NOT EXISTS ${AUDIT_TABLE_NAME}(
-  audit_id bigint NOT NULL DEFAULT nextval('main_audit_seq')
+  audit_id bigint UNIQUE NOT NULL DEFAULT nextval('main_audit_seq')
   ,operation pgauditor_operation
   ,changed_by text
   ,changed_at timestamp with time zone
@@ -366,24 +395,41 @@ cat<<EOF
   IF (operation_var = 'UPDATE') THEN
 EOF
 
-# Iterate through the columns
-while IFS= read -r line; do
-  echo $line | awk '
-    BEGIN{
-      FS="|";
-    }{
-      old_name="OLD." $1;
-      new_name="NEW." $1;
+if [ "all" == "${MODE}" ]; then
+  # Capture all columns regardless of whether or not they changed
+  while IFS= read -r line; do
+    echo $line | awk '
+      BEGIN{
+        FS="|";
+      }{
+        old_name="OLD." $1;
+        new_name="NEW." $1;
 
+        print "    old_" $1 "_var := OLD." $1 ";";
+        print "    new_" $1 "_var := NEW." $1 ";"
+      }
+    '
+  done < "${COLUMN_TMP_FILE}"
+  echo "    change_count := change_count + 1;"
+elif [ "changed" == "${MODE}" ]; then
+  # Capture only the columns which have changed
+  while IFS= read -r line; do
+    echo $line | awk '
+      BEGIN{
+        FS="|";
+      }{
+        old_name="OLD." $1;
+        new_name="NEW." $1;
 
-      print "    IF ((" old_name " IS NULL and " new_name " IS NOT NULL) or (" old_name " IS NOT NULL and " new_name " IS NULL) or (" old_name " != " new_name ")) THEN";
-      print "      old_" $1 "_var := OLD." $1 ";";
-      print "      new_" $1 "_var := NEW." $1 ";"
-      print "      change_count := change_count + 1;"
-      print "    END IF;"
-    }
-  '
-done < "${COLUMN_TMP_FILE}"
+        print "    IF ((" old_name " IS NULL and " new_name " IS NOT NULL) or (" old_name " IS NOT NULL and " new_name " IS NULL) or (" old_name " != " new_name ")) THEN";
+        print "      old_" $1 "_var := OLD." $1 ";";
+        print "      new_" $1 "_var := NEW." $1 ";"
+        print "      change_count := change_count + 1;"
+        print "    END IF;"
+      }
+    '
+  done < "${COLUMN_TMP_FILE}"
+fi
 
 cat <<EOF
   ELSIF (operation_var = 'INSERT') THEN
