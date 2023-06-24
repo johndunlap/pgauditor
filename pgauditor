@@ -47,7 +47,7 @@ eval set -- "$PARSED_OPTIONS"
 
 # Default values
 VERSION="1.0"
-AUTH_TYPE="set"
+AUTH_TYPE="user"
 
 # Define help message so that we can use it during validation
 HELP=$(cat<<EOF
@@ -56,11 +56,20 @@ Options:
   -t, --table  <table>         Specify the table which should be audited. This
                                option is required.
   -a, --auth   [set|user|anon] The mechanism used to determine the current
-                               user. The set option uses the values of a
-                               configuration parameter to determine the
-                               current user. The user option uses the current
-                               user of the database. The anon option does not
-                               require authentication. The default value is set.
+                               user. The set authentication type uses the
+                               values of a configuration parameter to determine
+                               the current user. The advantage of the set
+                               authentication type is that it allows a single
+                               database user to be shared between multiple
+                               application level users without losing track of
+                               who modified what. The down side of the set
+                               authentication type is that developers are
+                               responsible for setting and unsetting the
+                               configuration parameter in their application
+                               to ensure accurate reporting. The user
+                               authentication type captures the current
+                               database username. The anon option does not
+                               require authentication. The default value is user.
   -v, --version                Print $(basename $0) version and exit
   -h, --help                   Print this help message and exit
 EOF
