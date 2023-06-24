@@ -1,9 +1,18 @@
 #!/bin/bash
 
 # =============================================================================
-# pg-audit
-# Copyright (C) 2023 John Dunlap<john.david.dunlap@gmail.com>
+#                               _ _ _
+#   _ __   __ _  __ _ _   _  __| (_) |_ ___  _ __
+#  | '_ \ / _` |/ _` | | | |/ _` | | __/ _ \| '__|
+#  | |_) | (_| | (_| | |_| | (_| | | || (_) | |
+#  | .__/ \__, |\__,_|\__,_|\__,_|_|\__\___/|_|
+#  |_|    |___/
+#
 # =============================================================================
+# MIT License
+#
+# Copyright (C) 2023 John Dunlap<john.david.dunlap@gmail.com>
+#
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
 # in the Software without restriction, including without limitation the rights
@@ -126,27 +135,6 @@ fi
 
 AUDIT_TABLE_NAME="aud_${TABLE}"
 
-# Script utility functions
-delete_trigger_if_exists() {
-  local trigger_name="$1"
-  local table_name="$2"
-
-  local query="SELECT EXISTS (
-      SELECT 1
-      FROM pg_trigger
-      WHERE tgname = '$trigger_name'
-        AND tgrelid = '$table_name'::regclass
-  );"
-
-  # Assumes that connection parameters are set in the environment
-  local result=$(psql -t -c "$query" | sed 's/[ ]*//g')
-
-  # Only emit the delete if the trigger exists. This avoids annoying warning messages in the output
-  if [[ $result == "t" ]]; then
-    echo "DROP TRIGGER IF EXISTS ${trigger_name} ON ${TABLE};"
-  fi
-}
-
 # Create a temporary file for storing the column metadata so that we can use it multiple times
 COLUMN_TMP_FILE=$(mktemp)
 
@@ -169,6 +157,26 @@ TMP_FILE=$(mktemp)
 # Register a trap to delete the temporary file on exit
 trap 'rm -f "$TMP_FILE"' EXIT
 
+# Script utility functions
+delete_trigger_if_exists() {
+  local trigger_name="$1"
+  local table_name="$2"
+
+  local query="SELECT EXISTS (
+      SELECT 1
+      FROM pg_trigger
+      WHERE tgname = '$trigger_name'
+        AND tgrelid = '$table_name'::regclass
+  );"
+
+  # Assumes that connection parameters are set in the environment
+  local result=$(psql -t -c "$query" | sed 's/[ ]*//g')
+
+  # Only emit the delete if the trigger exists. This avoids annoying warning messages in the output
+  if [[ $result == "t" ]]; then
+    echo "DROP TRIGGER IF EXISTS ${trigger_name} ON ${TABLE};"
+  fi
+}
 
 # Create utility functions
 cat <<'EOF'
@@ -188,10 +196,14 @@ EOF
 
 echo
 
+INSERT_TRIGGER_NAME="${AUDIT_TABLE_NAME}_insert_trigger"
+UPDATE_TRIGGER_NAME="${AUDIT_TABLE_NAME}_update_trigger"
+DELETE_TRIGGER_NAME="${AUDIT_TABLE_NAME}_delete_trigger"
+
 # Delete the triggers if they exist
-delete_trigger_if_exists "${AUDIT_TABLE_NAME}_insert_trigger" "${TABLE}"
-delete_trigger_if_exists "${AUDIT_TABLE_NAME}_update_trigger" "${TABLE}"
-delete_trigger_if_exists "${AUDIT_TABLE_NAME}_delete_trigger" "${TABLE}"
+delete_trigger_if_exists "${INSERT_TRIGGER_NAME}" "${TABLE}"
+delete_trigger_if_exists "${UPDATE_TRIGGER_NAME}" "${TABLE}"
+delete_trigger_if_exists "${DELETE_TRIGGER_NAME}" "${TABLE}"
 
 # Drop existing trigger definitions if they exist
 cat <<EOF
@@ -333,7 +345,6 @@ BEGIN
 
 EOF
 
-# If AUTH_TYPE equals "set"
 if [ "set" == "${AUTH_TYPE}" ]; then
   cat <<EOF
     SELECT INTO changed_by_var get_current_setting('pgauditor.current_user');
@@ -462,7 +473,7 @@ EOF
 
 # Create trigger definitions
 cat <<EOF
-CREATE TRIGGER ${AUDIT_TABLE_NAME}_insert_trigger AFTER INSERT ON ${TABLE} FOR EACH ROW EXECUTE PROCEDURE audit_${TABLE}_changes();
-CREATE TRIGGER ${AUDIT_TABLE_NAME}_update_trigger AFTER UPDATE ON ${TABLE} FOR EACH ROW EXECUTE PROCEDURE audit_${TABLE}_changes();
-CREATE TRIGGER ${AUDIT_TABLE_NAME}_delete_trigger AFTER DELETE ON ${TABLE} FOR EACH ROW EXECUTE PROCEDURE audit_${TABLE}_changes();
+CREATE TRIGGER ${INSERT_TRIGGER_NAME} AFTER INSERT ON ${TABLE} FOR EACH ROW EXECUTE PROCEDURE audit_${TABLE}_changes();
+CREATE TRIGGER ${UPDATE_TRIGGER_NAME} AFTER UPDATE ON ${TABLE} FOR EACH ROW EXECUTE PROCEDURE audit_${TABLE}_changes();
+CREATE TRIGGER ${DELETE_TRIGGER_NAME} AFTER DELETE ON ${TABLE} FOR EACH ROW EXECUTE PROCEDURE audit_${TABLE}_changes();
 EOF
