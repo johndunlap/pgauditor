@@ -34,26 +34,35 @@
 # =============================================================================
 
 # Process command-line options using getopt
-OPTIONS="t:vh"
-LONGOPTS="table:,version,help"
+OPTIONS="t:a:vh"
+LONGOPTS="table:,auth:,version,help"
 
 # Parse the options and store them in variables
 PARSED_OPTIONS=$(getopt -n "$0" -o "$OPTIONS" --long "$LONGOPTS" -- "$@")
 if [ $? -ne 0 ]; then
+    >&2 echo "Failed to parse command line options"
     exit 1
 fi
 eval set -- "$PARSED_OPTIONS"
 
 # Default values
 VERSION="1.0"
+AUTH_TYPE="set"
 
 # Define help message so that we can use it during validation
 HELP=$(cat<<EOF
 Usage: $(basename $0) [OPTIONS]
 Options:
-  -t, --table   <table>       Specify the table which should be audited
-  -v, --version               Print $(basename $0) version and exit
-  -h, --help                  Print this help message and exit
+  -t, --table  <table>         Specify the table which should be audited. This
+                               option is required.
+  -a, --auth   [set|user|anon] The mechanism used to determine the current
+                               user. The set option uses the values of a
+                               configuration parameter to determine the
+                               current user. The user option uses the current
+                               user of the database. The anon option does not
+                               require authentication. The default value is set.
+  -v, --version                Print $(basename $0) version and exit
+  -h, --help                   Print this help message and exit
 EOF
 )
 
@@ -62,6 +71,10 @@ while true; do
     case "$1" in
         -t | --table)
             TABLE="$2"
+            shift 2
+            ;;
+        -a | --auth)
+            AUTH_TYPE="$2"
             shift 2
             ;;
         -v | --version)
@@ -85,18 +98,45 @@ done
 
 # Check for required parameters
 if [ -z "$TABLE" ]; then
-    echo "${HELP}"
-    exit 1
+    >&2 echo "${HELP}"
+    exit 2
 fi
 
 # Verify that the table exists in PostgreSQL
 psql -c "SELECT 1 FROM ${TABLE} LIMIT 1" > /dev/null 2>&1
 if [ $? -ne 0 ]; then
-    echo "Table ${TABLE} does not exist"
-    exit 2
+    >&2 echo "Table ${TABLE} does not exist"
+    exit 3
+fi
+
+# Verify that the auth type is known and supported
+if [ "${AUTH_TYPE}" != "set" ] && [ "${AUTH_TYPE}" != "user" ] && [ "${AUTH_TYPE}" != "anon" ]; then
+    >&2 echo "Unknown auth type: ${AUTH_TYPE}. Supported auth types are set, user, and anon"
+    exit 4
 fi
 
 AUDIT_TABLE_NAME="aud_${TABLE}"
+
+# Script utility functions
+delete_trigger_if_exists() {
+  local trigger_name="$1"
+  local table_name="$2"
+
+  local query="SELECT EXISTS (
+      SELECT 1
+      FROM pg_trigger
+      WHERE tgname = '$trigger_name'
+        AND tgrelid = '$table_name'::regclass
+  );"
+
+  # Assumes that connection parameters are set in the environment
+  local result=$(psql -t -c "$query" | sed 's/[ ]*//g')
+
+  # Only emit the delete if the trigger exists. This avoids annoying warning messages in the output
+  if [[ $result == "t" ]]; then
+    echo "DROP TRIGGER IF EXISTS ${trigger_name} ON ${TABLE};"
+  fi
+}
 
 # Create a temporary file for storing the column metadata so that we can use it multiple times
 COLUMN_TMP_FILE=$(mktemp)
@@ -123,26 +163,6 @@ trap 'rm -f "$TMP_FILE"' EXIT
 
 # Create utility functions
 cat <<'EOF'
-CREATE OR REPLACE FUNCTION empty(s text) RETURNS BOOLEAN
-LANGUAGE plpgsql
-AS
-$BODY$
-DECLARE
-BEGIN
-    RETURN s IS NULL OR TRIM(s) = '';
-END;
-$BODY$ VOLATILE;
-
-CREATE OR REPLACE FUNCTION empty(s varchar) RETURNS BOOLEAN
-LANGUAGE plpgsql
-AS
-$BODY$
-DECLARE
-BEGIN
-    RETURN s IS NULL OR TRIM(s) = '';
-END;
-$BODY$ VOLATILE;
-
 CREATE OR REPLACE FUNCTION get_current_setting(name text) RETURNS TEXT
 LANGUAGE plpgsql
 AS $BODY$
@@ -155,127 +175,17 @@ EXCEPTION WHEN OTHERS THEN
     RETURN NULL;
 END;
 $BODY$ VOLATILE;
-
-CREATE OR REPLACE FUNCTION is_different(boolean, boolean)
-	RETURNS boolean
-LANGUAGE plpgsql
-AS $BODY$
-DECLARE
-	a ALIAS FOR $1;
-	b ALIAS FOR $2;
-BEGIN
-	if ((a IS NULL and b IS NOT NULL) or (a IS NOT NULL and b IS NULL) or (a != b)) THEN
-		return true;
-	END IF;
-
-	return false;
-END;
-$BODY$ VOLATILE;
-
-CREATE OR REPLACE FUNCTION is_different(bigint, bigint)
-	RETURNS boolean
-LANGUAGE plpgsql
-AS $BODY$
-DECLARE
-	a ALIAS FOR $1;
-	b ALIAS FOR $2;
-BEGIN
-	if ((a IS NULL and b IS NOT NULL) or (a IS NOT NULL and b IS NULL) or (a != b)) THEN
-		return true;
-	END IF;
-
-	return false;
-END;
-$BODY$ VOLATILE;
-
-CREATE OR REPLACE FUNCTION is_different(integer, integer)
-	RETURNS boolean
-LANGUAGE plpgsql
-AS $BODY$
-DECLARE
-	a ALIAS FOR $1;
-	b ALIAS FOR $2;
-BEGIN
-	if ((a IS NULL and b IS NOT NULL) or (a IS NOT NULL and b IS NULL) or (a != b)) THEN
-		return true;
-	END IF;
-
-	return false;
-END;
-$BODY$ VOLATILE;
-
-CREATE OR REPLACE FUNCTION is_different(character varying, character varying)
-	RETURNS boolean
-LANGUAGE plpgsql
-AS $BODY$
-DECLARE
-	a ALIAS FOR $1;
-	b ALIAS FOR $2;
-BEGIN
-	if ((a IS NULL and b IS NOT NULL) or (a IS NOT NULL and b IS NULL) or (a != b)) THEN
-		return true;
-	END IF;
-
-	return false;
-END;
-$BODY$ VOLATILE;
-
-CREATE OR REPLACE FUNCTION is_different(timestamp without time zone, timestamp without time zone)
-	RETURNS boolean
-LANGUAGE plpgsql
-AS $BODY$
-DECLARE
-	a ALIAS FOR $1;
-	b ALIAS FOR $2;
-BEGIN
-	if ((a IS NULL and b IS NOT NULL) or (a IS NOT NULL and b IS NULL) or (a != b)) THEN
-		return true;
-	END IF;
-
-	return false;
-END;
-$BODY$ VOLATILE;
-
-CREATE OR REPLACE FUNCTION is_different(timestamp with time zone, timestamp with time zone)
-	RETURNS boolean
-LANGUAGE plpgsql
-AS $BODY$
-DECLARE
-	a ALIAS FOR $1;
-	b ALIAS FOR $2;
-BEGIN
-	if ((a IS NULL and b IS NOT NULL) or (a IS NOT NULL and b IS NULL) or (a != b)) THEN
-		return true;
-	END IF;
-
-	return false;
-END;
-$BODY$ VOLATILE;
-
-CREATE OR REPLACE FUNCTION is_different(numeric, numeric)
-	RETURNS boolean
-LANGUAGE plpgsql
-AS $BODY$
-DECLARE
-	a ALIAS FOR $1;
-	b ALIAS FOR $2;
-BEGIN
-	if ((a IS NULL and b IS NOT NULL) or (a IS NOT NULL and b IS NULL) or (a != b)) THEN
-		return true;
-	END IF;
-
-	return false;
-END;
-$BODY$ VOLATILE;
 EOF
 
 echo
 
+# Delete the triggers if they exist
+delete_trigger_if_exists "${AUDIT_TABLE_NAME}_insert_trigger" "${TABLE}"
+delete_trigger_if_exists "${AUDIT_TABLE_NAME}_update_trigger" "${TABLE}"
+delete_trigger_if_exists "${AUDIT_TABLE_NAME}_delete_trigger" "${TABLE}"
+
 # Drop existing trigger definitions if they exist
 cat <<EOF
-DROP TRIGGER IF EXISTS ${AUDIT_TABLE_NAME}_insert_trigger ON ${TABLE};
-DROP TRIGGER IF EXISTS ${AUDIT_TABLE_NAME}_update_trigger ON ${TABLE};
-DROP TRIGGER IF EXISTS ${AUDIT_TABLE_NAME}_delete_trigger ON ${TABLE};
 DROP FUNCTION IF EXISTS audit_${TABLE}_changes();
 EOF
 
@@ -303,7 +213,7 @@ SELECT EXISTS (
    AND typtype = 'e'
 );
 EOF
-ENUM_EXISTS=$(cat "${TMP_FILE}" | sed 's/[ \n]*//g')
+ENUM_EXISTS=$(sed 's/[ \n]*//g' < "${TMP_FILE}")
 
 # Create the operation type enum if it does not already exist
 if [ "f" == "${ENUM_EXISTS}" ]; then
@@ -379,9 +289,8 @@ EOF
   done < "${COLUMN_TMP_FILE}"
 
   echo ");"
+  echo
 fi
-
-echo
 
 # Create trigger function
 cat <<EOF
@@ -409,15 +318,31 @@ while IFS= read -r line; do
 done < "${COLUMN_TMP_FILE}"
 
 cat <<EOF
-	change_count INT := 0;
+  change_count INT := 0;
 BEGIN
   operation_var=TG_OP::pgauditor_operation;
-  select into changed_by_var get_current_setting('pgauditor.current_user');
 
-  IF empty(changed_by_var) = true THEN
-    RAISE EXCEPTION 'Anonymous updates are not permitted for audited table ${TABLE}. To identify the user making the change run: SET [LOCAL] "pgauditor.current_user"=<user>';
-  END IF;
+EOF
 
+# If AUTH_TYPE equals "set"
+if [ "set" == "${AUTH_TYPE}" ]; then
+  cat <<EOF
+    SELECT INTO changed_by_var get_current_setting('pgauditor.current_user');
+    IF changed_by_var is null or trim(changed_by_var) = '' THEN
+      RAISE EXCEPTION 'Anonymous updates are not permitted for audited table ${TABLE}. To identify the user making the change run: SET [LOCAL] "pgauditor.current_user"=<user>';
+    END IF;
+EOF
+  echo
+elif [ "user" == "${AUTH_TYPE}" ]; then
+  # We don't need to check if we have a value because current_user will always return a value
+  echo "select into changed_by_var current_user;"
+  echo
+elif [ "anon" != "${AUTH_TYPE}" ]; then
+  >&2 echo "Unsupported auth type: ${AUTH_TYPE}"
+  exit 5
+fi
+
+cat<<EOF
   IF (operation_var = 'UPDATE') THEN
 EOF
 
@@ -430,7 +355,8 @@ while IFS= read -r line; do
       old_name="OLD." $1;
       new_name="NEW." $1;
 
-      print "    IF is_different(" old_name ", " new_name ") = true THEN";
+
+      print "    IF ((" old_name " IS NULL and " new_name " IS NOT NULL) or (" old_name " IS NOT NULL and " new_name " IS NULL) or (" old_name " != " new_name ")) THEN";
       print "      old_" $1 "_var := OLD." $1 ";";
       print "      new_" $1 "_var := NEW." $1 ";"
       print "      change_count := change_count + 1;"
