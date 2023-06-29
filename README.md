@@ -10,6 +10,7 @@ https://www.postgresql.org/docs/current/libpq-envars.html
 * PGDATABASE
 * PGUSER
 * PGPASSWORD
+* PGAPPNAME
 
 ## Usage
 ```bash
