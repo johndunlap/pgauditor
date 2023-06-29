@@ -43,8 +43,8 @@
 # =============================================================================
 
 # Process command-line options using getopt
-OPTIONS="dt:a:m:vhn"
-LONGOPTS="drop,table:,auth:,mode:,version,help,application-name"
+OPTIONS="dt:a:m:vhnc:"
+LONGOPTS="drop,table:,auth:,mode:,version,help,application-name,config-name:"
 
 # Parse the options and store them in variables
 PARSED_OPTIONS=$(getopt -n "$0" -o "$OPTIONS" --long "$LONGOPTS" -- "$@")
@@ -64,6 +64,7 @@ AUTH_TYPE="user"
 MODE="changed"
 CAPTURE_APPLICATION_NAME=0
 DROP=0
+PGAUDITOR_CONFIG_NAME="pgauditor.current_user"
 
 # Define help message so that we can use it during validation
 HELP=$(cat<<EOF
@@ -87,6 +88,11 @@ Options:
                                database username. The anon option does not
                                require authentication. The default value is
                                user.
+  -c, --config-name            The name of the configuration parameter which
+                               will be used to determine the current user. Note
+                               that this value is only used when the "set" is
+                               passed to the --auth flag. The default value is
+                               "pgauditor.current_user".
   -n, --application-name       No argument required. When this flag is passed,
                                the application name will be captured in the
                                audit table. This is useful for identifying
@@ -118,6 +124,10 @@ while true; do
     case "$1" in
         -t | --table)
             TABLE="$2"
+            shift 2
+            ;;
+        -c | --config-name)
+            PGAUDITOR_CONFIG_NAME="$2"
             shift 2
             ;;
         -a | --auth)
@@ -480,9 +490,9 @@ EOF
 
 if [ "set" == "${AUTH_TYPE}" ]; then
   cat <<EOF
-    SELECT INTO changed_by_var get_current_setting('pgauditor.current_user');
+    SELECT INTO changed_by_var get_current_setting('${PGAUDITOR_CONFIG_NAME}');
     IF changed_by_var is null or trim(changed_by_var) = '' THEN
-      RAISE EXCEPTION 'Anonymous updates are not permitted for audited table ${TABLE}. To identify the user making the change run: SET [LOCAL] "pgauditor.current_user"=<user>';
+      RAISE EXCEPTION 'Anonymous updates are not permitted for audited table ${TABLE}. To identify the user making the change run: SET [LOCAL] "${PGAUDITOR_CONFIG_NAME}"=<user>';
     END IF;
 EOF
   echo
