@@ -61,7 +61,7 @@ VERSION="1.0"
 # common use cases and because they are the easiest for the user to implement
 # in their application.
 AUTH_TYPE="user"
-MODE="all"
+MODE="changed"
 
 # Define help message so that we can use it during validation
 HELP=$(cat<<EOF
@@ -85,23 +85,23 @@ Options:
                                database username. The anon option does not
                                require authentication. The default value is
                                user.
-  -m, --mode=[all|changed]     In "all" mode, the full row will be captured in
-                               the audit table regardless of how many columns
-                               were modified. In "changed" made, only the columns
-                               which have changed will be captured in the audit
-                               table. The benefits of only capturing values
-                               which have changed are that the audit table
-                               takes up less space on disk and it is easier
-                               to identify what has been changed. The drawback
-                               is that it is more difficult to get a complete
-                               snapshot of the row when the change occurred if
-                               everything in the audit table is null except for
-                               the value(s) which changed. The default is "all"
-                               mode.
   -v, --version                Print $(basename $0) version and exit
   -h, --help                   Print this help message and exit
 EOF
 )
+
+ # TODO: Add more modes
+ #  -m, --mode=[changed]         In "changed" mode, only the columns
+ #                               which have changed will be captured in the audit
+ #                               table. The benefits of only capturing values
+ #                               which have changed are that the audit table
+ #                               takes up less space on disk and it is easier
+ #                               to identify what has been changed. The drawback
+ #                               is that it is more difficult to get a complete
+ #                               snapshot of the row when the change occurred if
+ #                               everything in the audit table is null except for
+ #                               the value(s) which changed. The default is "changed"
+ #                               mode.
 
 # Process the parsed options
 while true; do
@@ -157,8 +157,8 @@ if [ "${AUTH_TYPE}" != "set" ] && [ "${AUTH_TYPE}" != "user" ] && [ "${AUTH_TYPE
 fi
 
 #Verify that the mode is known and supported
-if [ "${MODE}" != "all" ] && [ "${MODE}" != "changed" ]; then
-    >&2 echo "Unknown mode: ${MODE}. Supported modes are all and changed"
+if [ "${MODE}" != "changed" ]; then
+    >&2 echo "Unknown mode: ${MODE}. Supported modes are: [changes]"
     exit 6
 fi
 
@@ -187,7 +187,7 @@ TMP_FILE=$(mktemp)
 trap 'rm -f "$TMP_FILE"' EXIT
 
 # Script utility functions
-delete_trigger_if_exists() {
+drop_trigger_if_exists() {
   local trigger_name="$1"
   local table_name="$2"
 
@@ -204,6 +204,24 @@ delete_trigger_if_exists() {
   # Only emit the delete if the trigger exists. This avoids annoying warning messages in the output
   if [[ $result == "t" ]]; then
     echo "DROP TRIGGER IF EXISTS ${trigger_name} ON ${TABLE};"
+  fi
+}
+
+drop_function_if_exists() {
+  local function_name="$1"
+
+  local query="SELECT EXISTS (
+    select 1
+    from pg_proc
+    where proname = '${function_name}'
+  );"
+
+  # Assumes that connection parameters are set in the environment
+  local result=$(psql -t -c "$query" | sed 's/[ ]*//g')
+
+  # Only emit the delete if the function exists. This avoids annoying warning messages in the output
+  if [[ $result == "t" ]]; then
+    echo "DROP FUNCTION IF EXISTS ${function_name};"
   fi
 }
 
@@ -225,19 +243,18 @@ EOF
 
 echo
 
+# Create trigger names
 INSERT_TRIGGER_NAME="${AUDIT_TABLE_NAME}_insert_trigger"
 UPDATE_TRIGGER_NAME="${AUDIT_TABLE_NAME}_update_trigger"
 DELETE_TRIGGER_NAME="${AUDIT_TABLE_NAME}_delete_trigger"
 
 # Delete the triggers if they exist
-delete_trigger_if_exists "${INSERT_TRIGGER_NAME}" "${TABLE}"
-delete_trigger_if_exists "${UPDATE_TRIGGER_NAME}" "${TABLE}"
-delete_trigger_if_exists "${DELETE_TRIGGER_NAME}" "${TABLE}"
+drop_trigger_if_exists "${INSERT_TRIGGER_NAME}" "${TABLE}"
+drop_trigger_if_exists "${UPDATE_TRIGGER_NAME}" "${TABLE}"
+drop_trigger_if_exists "${DELETE_TRIGGER_NAME}" "${TABLE}"
 
 # Drop existing trigger definitions if they exist
-cat <<EOF
-DROP FUNCTION IF EXISTS audit_${TABLE}_changes();
-EOF
+drop_function_if_exists "audit_${TABLE}_changes"
 
 echo
 
@@ -395,23 +412,7 @@ cat<<EOF
   IF (operation_var = 'UPDATE') THEN
 EOF
 
-if [ "all" == "${MODE}" ]; then
-  # Capture all columns regardless of whether or not they changed
-  while IFS= read -r line; do
-    echo $line | awk '
-      BEGIN{
-        FS="|";
-      }{
-        old_name="OLD." $1;
-        new_name="NEW." $1;
-
-        print "    old_" $1 "_var := OLD." $1 ";";
-        print "    new_" $1 "_var := NEW." $1 ";"
-      }
-    '
-  done < "${COLUMN_TMP_FILE}"
-  echo "    change_count := change_count + 1;"
-elif [ "changed" == "${MODE}" ]; then
+if [ "changed" == "${MODE}" ]; then
   # Capture only the columns which have changed
   while IFS= read -r line; do
     echo $line | awk '
@@ -429,6 +430,9 @@ elif [ "changed" == "${MODE}" ]; then
       }
     '
   done < "${COLUMN_TMP_FILE}"
+else
+  >&2 echo "Unsupported mode: ${MODE}"
+  exit 7
 fi
 
 cat <<EOF
