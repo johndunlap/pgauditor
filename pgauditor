@@ -43,8 +43,8 @@
 # =============================================================================
 
 # Process command-line options using getopt
-OPTIONS="t:a:m:vh"
-LONGOPTS="table:,auth:,mode:,version,help"
+OPTIONS="dt:a:m:vhn"
+LONGOPTS="drop,table:,auth:,mode:,version,help,application-name"
 
 # Parse the options and store them in variables
 PARSED_OPTIONS=$(getopt -n "$0" -o "$OPTIONS" --long "$LONGOPTS" -- "$@")
@@ -62,6 +62,8 @@ VERSION="1.0"
 # in their application.
 AUTH_TYPE="user"
 MODE="changed"
+CAPTURE_APPLICATION_NAME=0
+DROP=0
 
 # Define help message so that we can use it during validation
 HELP=$(cat<<EOF
@@ -85,6 +87,14 @@ Options:
                                database username. The anon option does not
                                require authentication. The default value is
                                user.
+  -n, --application-name       No argument required. When this flag is passed,
+                               the application name will be captured in the
+                               audit table. This is useful for identifying
+                               which application made the change. The default
+                               is to not capture the application name.
+  -d, --drop                   No argument required. Drops audit triggers and
+                               audit function for specified table. Audit table,
+                               sequence, and enum type are not dropped.
   -v, --version                Print $(basename $0) version and exit
   -h, --help                   Print this help message and exit
 EOF
@@ -117,6 +127,14 @@ while true; do
         -m | --mode)
             MODE="$2"
             shift 2
+            ;;
+        -d | --drop)
+            DROP=1
+            shift 1
+            ;;
+        -n | --application-name)
+            CAPTURE_APPLICATION_NAME=1
+            shift 1
             ;;
         -v | --version)
             echo "${VERSION}"
@@ -162,6 +180,15 @@ if [ "${MODE}" != "changed" ]; then
     exit 6
 fi
 
+# The name of the enum type which is used to identify the type of operation which created the audit record
+ENUM_TYPE_NAME="pgauditor_operation"
+
+# The name of the sequence which should be used to uniquely identify each row in the audit table. This sequence is used
+# to generate the value for the audit_id column. The audit_id column is a primary key and is used to identify a row
+# in the audit table and to reconstruct the natural order of modifications across multiple audit tables.
+SEQUENCE_NAME="pgauditor_audit_seq"
+
+# The name of the audit table is based on the name of the table being audited
 AUDIT_TABLE_NAME="aud_${TABLE}"
 
 # Create a temporary file for storing the column metadata so that we can use it multiple times
@@ -190,6 +217,7 @@ trap 'rm -f "$TMP_FILE"' EXIT
 drop_trigger_if_exists() {
   local trigger_name="$1"
   local table_name="$2"
+  local result="f"
 
   local query="SELECT EXISTS (
       SELECT 1
@@ -199,7 +227,7 @@ drop_trigger_if_exists() {
   );"
 
   # Assumes that connection parameters are set in the environment
-  local result=$(psql -t -c "$query" | sed 's/[ ]*//g')
+  result=$(psql -t -c "$query" | sed 's/[ ]*//g')
 
   # Only emit the delete if the trigger exists. This avoids annoying warning messages in the output
   if [[ $result == "t" ]]; then
@@ -207,8 +235,9 @@ drop_trigger_if_exists() {
   fi
 }
 
-drop_function_if_exists() {
+function_exists() {
   local function_name="$1"
+  local result="f"
 
   local query="SELECT EXISTS (
     select 1
@@ -217,29 +246,91 @@ drop_function_if_exists() {
   );"
 
   # Assumes that connection parameters are set in the environment
-  local result=$(psql -t -c "$query" | sed 's/[ ]*//g')
+  result=$(psql -t -c "$query" | sed 's/[ ]*//g')
 
-  # Only emit the delete if the function exists. This avoids annoying warning messages in the output
-  if [[ $result == "t" ]]; then
+  # Convert the text to a numeric value
+  if [ "t" == "${result}" ]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+# Drops the specified function if it exists
+drop_function_if_exists() {
+  local function_name="$1"
+
+  # Only emit the drop if the function exists. This avoids annoying warning messages in the output
+  if function_exists "${function_name}"; then
     echo "DROP FUNCTION IF EXISTS ${function_name};"
   fi
 }
 
-# Create utility functions
-cat <<'EOF'
-CREATE OR REPLACE FUNCTION get_current_setting(name text) RETURNS TEXT
-LANGUAGE plpgsql
-AS $BODY$
-DECLARE
-    value text;
-BEGIN
-    SELECT INTO value current_setting(NAME);
-        RETURN value;
-EXCEPTION WHEN OTHERS THEN
-    RETURN NULL;
-END;
-$BODY$ VOLATILE;
+# Check if the named table exists
+table_exists() {
+  local table_name="$1"
+  psql -c "SELECT 1 FROM ${table_name} LIMIT 1" > /dev/null 2>&1
+  return $?
+}
+
+# Check if the named sequence exists
+sequence_exists() {
+  local sequence_name="$1"
+  local sequence_exists="f"
+
+  psql -t <<EOF > "${TMP_FILE}"
+    SELECT EXISTS (
+        SELECT 1
+        FROM pg_sequences
+        WHERE sequencename = '${sequence_name}'
+    );
 EOF
+  sequence_exists=$(cat "${TMP_FILE}" | sed 's/[ \n]*//g')
+  if [ "f" == "${sequence_exists}" ]; then
+    return 1
+  else
+    return 0
+  fi
+}
+
+# Check if the named enum type exists
+enum_type_exists() {
+  local enum_type_name="$1"
+  local enum_exists="f"
+
+  psql -t <<EOF > "${TMP_FILE}"
+    SELECT EXISTS (
+      SELECT 1
+    FROM pg_type
+    WHERE typname = '${enum_type_name}'
+    AND typtype = 'e'
+  );
+EOF
+  enum_exists=$(sed 's/[ \n]*//g' < "${TMP_FILE}")
+  if [ "f" == "${enum_exists}" ]; then
+    return 1
+  else
+    return 0
+  fi
+}
+
+# Create utility SQL functions
+if ! function_exists "get_current_setting"; then
+  cat <<'EOF'
+  CREATE OR REPLACE FUNCTION get_current_setting(name text) RETURNS TEXT
+  LANGUAGE plpgsql
+  AS $BODY$
+  DECLARE
+      value text;
+  BEGIN
+      SELECT INTO value current_setting(NAME);
+          RETURN value;
+  EXCEPTION WHEN OTHERS THEN
+      RETURN NULL;
+  END;
+  $BODY$ VOLATILE;
+EOF
+fi
 
 echo
 
@@ -256,48 +347,31 @@ drop_trigger_if_exists "${DELETE_TRIGGER_NAME}" "${TABLE}"
 # Drop existing trigger definitions if they exist
 drop_function_if_exists "audit_${TABLE}_changes"
 
-echo
-
-psql -t <<EOF > "${TMP_FILE}"
-  SELECT EXISTS (
-      SELECT 1
-      FROM pg_sequences
-      WHERE sequencename = 'main_audit_seq'
-  );
-EOF
-SEQUENCE_EXISTS=$(cat "${TMP_FILE}" | sed 's/[ \n]*//g')
-
-# Create main audit sequence if it does not already exist
-if [ "f" == "${SEQUENCE_EXISTS}" ]; then
-  echo "CREATE SEQUENCE IF NOT EXISTS main_audit_seq;"
+# Exit if drop flag is active
+if [ "${DROP}" -eq 1 ]; then
+  exit 0
 fi
 
-psql -t <<EOF > "${TMP_FILE}"
-SELECT EXISTS (
-   SELECT 1
-   FROM pg_type
-   WHERE typname = 'pgauditor_operation'
-   AND typtype = 'e'
-);
-EOF
-ENUM_EXISTS=$(sed 's/[ \n]*//g' < "${TMP_FILE}")
+echo
+
+# Create main audit sequence if it does not already exist
+if ! sequence_exists "${SEQUENCE_NAME}"; then
+  echo "CREATE SEQUENCE IF NOT EXISTS ${SEQUENCE_NAME};"
+fi
 
 # Create the operation type enum if it does not already exist
-if [ "f" == "${ENUM_EXISTS}" ]; then
-  echo "CREATE TYPE pgauditor_operation AS ENUM ('INSERT', 'UPDATE', 'DELETE');"
+if ! enum_type_exists "${ENUM_TYPE_NAME}"; then
+  echo "CREATE TYPE ${ENUM_TYPE_NAME} AS ENUM ('INSERT', 'UPDATE', 'DELETE');"
 fi
 
 # Determine if the audit table exists in Postgresql by audit table name
-psql -c "SELECT 1 FROM ${AUDIT_TABLE_NAME} LIMIT 1" > /dev/null 2>&1
-AUDIT_TABLE_EXISTS=$?
-
-if [ ${AUDIT_TABLE_EXISTS} -eq 0 ]; then
+if table_exists "${AUDIT_TABLE_NAME}"; then
   # Add missing columns to existing audit table
   AUDIT_TABLE_COLUMNS=$(mktemp)
   
   # Register a trap to delete the temporary file on exit
   trap 'rm -f "$AUDIT_TABLE_COLUMNS"' EXIT
-  
+
   # Cache column names and types in a temporary file
   psql -t <<EOF | sed '/^$/d' | sed 's/^ //g' | tr -s ' ' | sed 's/ | /|/g' > "${AUDIT_TABLE_COLUMNS}"
   SELECT
@@ -334,15 +408,28 @@ EOF
       ' | cat
     fi
   done < "${COLUMN_TMP_FILE}"
+
+  if [ ${CAPTURE_APPLICATION_NAME} -eq 1 ]; then
+    # Add the application name column if it does not already exist
+    grep "application_name|text" "${AUDIT_TABLE_COLUMNS}"> /dev/null 2>&1
+    if [ $? -ne 0 ];then
+      echo "ALTER TABLE ${AUDIT_TABLE_NAME} ADD COLUMN application_name text;"
+    fi
+  fi
 else
   # Create audit table
 cat <<EOF
 CREATE TABLE IF NOT EXISTS ${AUDIT_TABLE_NAME}(
-  audit_id bigint UNIQUE NOT NULL DEFAULT nextval('main_audit_seq')
-  ,operation pgauditor_operation
+  audit_id bigint UNIQUE NOT NULL DEFAULT nextval('${SEQUENCE_NAME}')
+  ,operation ${ENUM_TYPE_NAME}
   ,changed_by text
   ,changed_at timestamp with time zone
 EOF
+  # Create a column for capturing the application name if requested
+  if [ ${CAPTURE_APPLICATION_NAME} -eq 1 ]; then
+    echo "  ,application_name text"
+  fi
+
   # Iterate through the columns
   while IFS= read -r line; do
     echo $line | awk '
@@ -369,8 +456,8 @@ $BODY$
 DECLARE
   changed_by_var text := NULL;
   changed_at_var timestamp with time zone := current_timestamp;
-  operation_var pgauditor_operation := NULL;
 EOF
+echo "  operation_var ${ENUM_TYPE_NAME} := NULL;"
 
 # Emit variables for both old and new values
 while IFS= read -r line; do
@@ -387,7 +474,7 @@ done < "${COLUMN_TMP_FILE}"
 cat <<EOF
   change_count INT := 0;
 BEGIN
-  operation_var=TG_OP::pgauditor_operation;
+  operation_var=TG_OP::${ENUM_TYPE_NAME};
 
 EOF
 
@@ -480,6 +567,11 @@ cat <<EOF
       ,changed_at
 EOF
 
+# Add the application name to the insert statement if requested
+if [ ${CAPTURE_APPLICATION_NAME} -eq 1 ]; then
+  echo "      ,application_name"
+fi
+
 # Iterate through the columns
 while IFS= read -r line; do
   echo $line | awk '
@@ -494,11 +586,16 @@ done < "${COLUMN_TMP_FILE}"
 
 cat <<EOF
     ) values(
-      nextval('main_audit_seq')
+      nextval('${SEQUENCE_NAME}')
       ,operation_var
       ,changed_by_var
       ,changed_at_var
 EOF
+
+# Capture application name if requested
+if [ ${CAPTURE_APPLICATION_NAME} -eq 1 ]; then
+  echo "      ,get_current_setting('application_name')"
+fi
 
 # Iterate through the columns
 while IFS= read -r line; do
