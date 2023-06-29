@@ -186,6 +186,6 @@ select * from aud_inventory;
 The output of this query is as follows:
 | audit_id | operation | changed_by | changed_at                        | old_id | new_id | old_name | new_name | old_quantity | new_quantity | old_unit_price | new_unit_price |
 |----------|-----------|------------|-----------------------------------|--------|--------|----------|----------|--------------|--------------|----------------|----------------|
-| 1        | INSERT    | personal   | 2023-06-29 04:53:21.202671 +00:00 |        | 4      |          | date     |              | 40           |                | 4              |
-| 2        | UPDATE    | personal   | 2023-06-29 04:53:22.135707 +00:00 |        |        |          |          | 10           | 11           |                |                |
-| 3        | DELETE    | personal   | 2023-06-29 04:53:22.723849 +00:00 | 3      |        | cherry   |          | 30           |              | 3              |                | 
+| 1        | INSERT    | personal   | 2023-06-29 04:53:21.202671 +00:00 | null   | 4      | null     | date     | null         | 40           | null           | 4              |
+| 2        | UPDATE    | personal   | 2023-06-29 04:53:22.135707 +00:00 | null   | null   | null     | null     | 10           | 11           | null           |                |
+| 3        | DELETE    | personal   | 2023-06-29 04:53:22.723849 +00:00 | 3      | null   | cherry   | null     | 30           | null         | 3              | null           | 
