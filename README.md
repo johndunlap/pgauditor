@@ -1,5 +1,7 @@
 # pgauditor
-pgauditor is a single file bash script which automates the generation of audit tables and trigger functions for PostgreSQL. It captures details like who, what, where, and when. There are many ways to capture this information but this approach requires very little time or infrastructure to implement within an existing PostgreSQL schema.
+pgauditor is a single file bash script which generates audit tables and trigger functions for PostgreSQL. Its audit tables can who, what, where, and when. This approach can quickly be implemented within any PostgreSQL application. Many of the generated implementation details can be customized with the CLI.
+
+IMPORTANT: A core design principle of pgauditor is that it does not delete or modify information under any circumstances. This is intentional because it mitiges the risk of a bug destroying information, which would be the exact opposite of its intended purpose.
 
 ## Connection parameters
 Set connection parameters by defining the following environment variables:
