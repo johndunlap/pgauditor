@@ -61,10 +61,12 @@ VERSION="1.0"
 # common use cases and because they are the easiest for the user to implement
 # in their application.
 AUTH_TYPE="user"
-MODE="changed"
+MODE="column"
 CAPTURE_APPLICATION_NAME=0
 DROP=0
 PGAUDITOR_CONFIG_NAME="pgauditor.current_user"
+SUPPORTED_MODES='column' # |row'
+SUPPORTED_AUTH_TYPES='set|user|anon'
 
 # Define help message so that we can use it during validation
 HELP=$(cat<<EOF
@@ -72,7 +74,7 @@ Usage: $(basename $0) [OPTIONS]
 Options:
   -t, --table=TABLE            Specify the table which should be audited. This
                                option is required.
-  -a, --auth=[set|user|anon]   The mechanism used to determine the current
+  -a, --auth=[${SUPPORTED_AUTH_TYPES}]   The mechanism used to determine the current
                                user. The set authentication type uses the
                                values of a configuration parameter to determine
                                the current user. The advantage of the set
@@ -106,18 +108,21 @@ Options:
 EOF
 )
 
- # TODO: Add more modes
- #  -m, --mode=[changed]         In "changed" mode, only the columns
- #                               which have changed will be captured in the audit
- #                               table. The benefits of only capturing values
- #                               which have changed are that the audit table
- #                               takes up less space on disk and it is easier
- #                               to identify what has been changed. The drawback
- #                               is that it is more difficult to get a complete
- #                               snapshot of the row when the change occurred if
- #                               everything in the audit table is null except for
- #                               the value(s) which changed. The default is "changed"
- #                               mode.
+# TODO: Support row level auditing
+#   -m, --mode=[${SUPPORTED_MODES}]     The audit mode which should be used. In row mode,
+#                               the entire row is captured when a change is made.
+#                               In column mode, only the columns which have
+#                               changed are captured. The advantage of column mode
+#                               is that both the new and old values are captured
+#                               in the same row. The advantage of row mode is that
+#                               fewer columns are required in the audit table. The
+#                               disadvantage of row mode is that the old and new
+#                               values are captured in separate rows. The
+#                               disadvantage of column mode is that it reduces the
+#                               maximum number of columns in a table by half
+#                               because two columns are required in the audit table
+#                               for each column which is being audited. The default
+#                               value is column.
 
 # Process the parsed options
 while true; do
@@ -171,10 +176,20 @@ if [ -z "$TABLE" ]; then
     exit 2
 fi
 
+SCHEMA="public"
+
+# Does the table name have a schema prefix?
+if [[ $TABLE == *"."* ]]; then
+    SCHEMA=$(echo "${TABLE}" | cut -d'.' -f1)
+    TABLE=$(echo "${TABLE}" | cut -d'.' -f2)
+fi
+
+SCHEMA_AND_TABLE="${SCHEMA}.${TABLE}"
+
 # Verify that the table exists in PostgreSQL
-psql -c "SELECT 1 FROM ${TABLE} LIMIT 1" > /dev/null 2>&1
+psql -c "SELECT 1 FROM ${SCHEMA_AND_TABLE} LIMIT 1" > /dev/null 2>&1
 if [ $? -ne 0 ]; then
-    >&2 echo "Table ${TABLE} does not exist"
+    >&2 echo "Table ${SCHEMA_AND_TABLE} does not exist"
     exit 3
 fi
 
@@ -184,9 +199,9 @@ if [ "${AUTH_TYPE}" != "set" ] && [ "${AUTH_TYPE}" != "user" ] && [ "${AUTH_TYPE
     exit 4
 fi
 
-#Verify that the mode is known and supported
-if [ "${MODE}" != "changed" ]; then
-    >&2 echo "Unknown mode: ${MODE}. Supported modes are: [changes]"
+# Verify that the mode is known and supported
+if [ "${MODE}" != "column" ]; then
+    >&2 echo "Unsupported mode: ${MODE}. Supported modes are: [${SUPPORTED_MODES}]"
     exit 6
 fi
 
@@ -214,6 +229,7 @@ SELECT
     data_type
 FROM information_schema.columns
 WHERE table_name = '${TABLE}'
+    AND table_schema = '${SCHEMA}'
 ORDER BY ordinal_position
 EOF
 
@@ -227,13 +243,17 @@ trap 'rm -f "$TMP_FILE"' EXIT
 drop_trigger_if_exists() {
   local trigger_name="$1"
   local table_name="$2"
+  local schema_name="$3"
   local result="f"
 
   local query="SELECT EXISTS (
       SELECT 1
-      FROM pg_trigger
-      WHERE tgname = '$trigger_name'
-        AND tgrelid = '$table_name'::regclass
+      FROM pg_trigger trg
+        INNER JOIN pg_class tbl ON trg.tgrelid = tbl.oid
+        INNER JOIN pg_namespace n ON tbl.relnamespace = n.oid
+      WHERE trg.tgname = '$trigger_name'
+        AND trg.tgrelid = '$table_name'::regclass
+        AND n.nspname = '$schema_name'
   );"
 
   # Assumes that connection parameters are set in the environment
@@ -241,18 +261,21 @@ drop_trigger_if_exists() {
 
   # Only emit the delete if the trigger exists. This avoids annoying warning messages in the output
   if [[ $result == "t" ]]; then
-    echo "DROP TRIGGER IF EXISTS ${trigger_name} ON ${TABLE};"
+    echo "DROP TRIGGER IF EXISTS ${trigger_name} ON ${schema_name}.${table_name};"
   fi
 }
 
 function_exists() {
   local function_name="$1"
+  local schema_name="$2"
   local result="f"
 
   local query="SELECT EXISTS (
     select 1
-    from pg_proc
-    where proname = '${function_name}'
+    from pg_proc p
+        inner join pg_namespace n ON p.pronamespace = n.oid
+    where p.proname = '${function_name}'
+        and n.nspname = '${schema_name}'
   );"
 
   # Assumes that connection parameters are set in the environment
@@ -269,9 +292,10 @@ function_exists() {
 # Drops the specified function if it exists
 drop_function_if_exists() {
   local function_name="$1"
+  local schema_name="$2"
 
   # Only emit the drop if the function exists. This avoids annoying warning messages in the output
-  if function_exists "${function_name}"; then
+  if function_exists "${function_name}" "${schema_name}"; then
     echo "DROP FUNCTION IF EXISTS ${function_name};"
   fi
 }
@@ -286,6 +310,7 @@ table_exists() {
 # Check if the named sequence exists
 sequence_exists() {
   local sequence_name="$1"
+  local schema_name="$2"
   local sequence_exists="f"
 
   psql -t <<EOF > "${TMP_FILE}"
@@ -293,6 +318,7 @@ sequence_exists() {
         SELECT 1
         FROM pg_sequences
         WHERE sequencename = '${sequence_name}'
+            AND schemaname = '${schema_name}'
     );
 EOF
   sequence_exists=$(cat "${TMP_FILE}" | sed 's/[ \n]*//g')
@@ -306,14 +332,17 @@ EOF
 # Check if the named enum type exists
 enum_type_exists() {
   local enum_type_name="$1"
+  local schema_name="$2"
   local enum_exists="f"
 
   psql -t <<EOF > "${TMP_FILE}"
     SELECT EXISTS (
       SELECT 1
-    FROM pg_type
-    WHERE typname = '${enum_type_name}'
-    AND typtype = 'e'
+    FROM pg_type pt
+        INNER JOIN pg_namespace pn ON pt.typnamespace = pn.oid
+    WHERE pt.typname = '${enum_type_name}'
+        AND pt.typtype = 'e'
+        AND pn.nspname = '${schema_name}'
   );
 EOF
   enum_exists=$(sed 's/[ \n]*//g' < "${TMP_FILE}")
@@ -325,9 +354,9 @@ EOF
 }
 
 # Create utility SQL functions
-if ! function_exists "get_current_setting"; then
+if ! function_exists "pgauditor_get_setting" "${SCHEMA}"; then
+  echo "  CREATE OR REPLACE FUNCTION ${SCHEMA}.pgauditor_get_setting(name text) RETURNS TEXT"
   cat <<'EOF'
-  CREATE OR REPLACE FUNCTION get_current_setting(name text) RETURNS TEXT
   LANGUAGE plpgsql
   AS $BODY$
   DECLARE
@@ -350,12 +379,12 @@ UPDATE_TRIGGER_NAME="${AUDIT_TABLE_NAME}_update_trigger"
 DELETE_TRIGGER_NAME="${AUDIT_TABLE_NAME}_delete_trigger"
 
 # Delete the triggers if they exist
-drop_trigger_if_exists "${INSERT_TRIGGER_NAME}" "${TABLE}"
-drop_trigger_if_exists "${UPDATE_TRIGGER_NAME}" "${TABLE}"
-drop_trigger_if_exists "${DELETE_TRIGGER_NAME}" "${TABLE}"
+drop_trigger_if_exists "${INSERT_TRIGGER_NAME}" "${TABLE}" "${SCHEMA}"
+drop_trigger_if_exists "${UPDATE_TRIGGER_NAME}" "${TABLE}" "${SCHEMA}"
+drop_trigger_if_exists "${DELETE_TRIGGER_NAME}" "${TABLE}" "${SCHEMA}"
 
 # Drop existing trigger definitions if they exist
-drop_function_if_exists "audit_${TABLE}_changes"
+drop_function_if_exists "audit_${TABLE}_changes" "${SCHEMA}"
 
 # Exit if drop flag is active
 if [ "${DROP}" -eq 1 ]; then
@@ -365,13 +394,13 @@ fi
 echo
 
 # Create main audit sequence if it does not already exist
-if ! sequence_exists "${SEQUENCE_NAME}"; then
-  echo "CREATE SEQUENCE IF NOT EXISTS ${SEQUENCE_NAME};"
+if ! sequence_exists "${SEQUENCE_NAME}" "${SCHEMA}"; then
+  echo "CREATE SEQUENCE IF NOT EXISTS ${SCHEMA}.${SEQUENCE_NAME};"
 fi
 
 # Create the operation type enum if it does not already exist
-if ! enum_type_exists "${ENUM_TYPE_NAME}"; then
-  echo "CREATE TYPE ${ENUM_TYPE_NAME} AS ENUM ('INSERT', 'UPDATE', 'DELETE');"
+if ! enum_type_exists "${ENUM_TYPE_NAME}" "${SCHEMA}"; then
+  echo "CREATE TYPE ${SCHEMA}.${ENUM_TYPE_NAME} AS ENUM ('INSERT', 'UPDATE', 'DELETE');"
 fi
 
 # Determine if the audit table exists in Postgresql by audit table name
@@ -429,9 +458,9 @@ EOF
 else
   # Create audit table
 cat <<EOF
-CREATE TABLE IF NOT EXISTS ${AUDIT_TABLE_NAME}(
-  audit_id bigint UNIQUE NOT NULL DEFAULT nextval('${SEQUENCE_NAME}')
-  ,operation ${ENUM_TYPE_NAME}
+CREATE TABLE IF NOT EXISTS ${SCHEMA}.${AUDIT_TABLE_NAME}(
+  audit_id bigint UNIQUE NOT NULL DEFAULT nextval('${SCHEMA}.${SEQUENCE_NAME}')
+  ,operation ${SCHEMA}.${ENUM_TYPE_NAME}
   ,changed_by text
   ,changed_at timestamp with time zone
 EOF
@@ -458,7 +487,7 @@ fi
 
 # Create trigger function
 cat <<EOF
-CREATE OR REPLACE FUNCTION audit_${TABLE}_changes() RETURNS TRIGGER
+CREATE OR REPLACE FUNCTION ${SCHEMA}.audit_${TABLE}_changes() RETURNS TRIGGER
 AS
 EOF
 cat <<'EOF'
@@ -489,10 +518,11 @@ BEGIN
 EOF
 
 if [ "set" == "${AUTH_TYPE}" ]; then
+  # TODO: Change the error message based on the authentication type
   cat <<EOF
-    SELECT INTO changed_by_var get_current_setting('${PGAUDITOR_CONFIG_NAME}');
+    SELECT INTO changed_by_var pgauditor_get_setting('${PGAUDITOR_CONFIG_NAME}');
     IF changed_by_var is null or trim(changed_by_var) = '' THEN
-      RAISE EXCEPTION 'Anonymous updates are not permitted for audited table ${TABLE}. To identify the user making the change run: SET [LOCAL] "${PGAUDITOR_CONFIG_NAME}"=<user>';
+      RAISE EXCEPTION 'Anonymous updates are not permitted for audited table ${SCHEMA}.${TABLE}. To identify the user making the change run: SET [LOCAL] "${PGAUDITOR_CONFIG_NAME}"=<user>';
     END IF;
 EOF
   echo
@@ -509,7 +539,7 @@ cat<<EOF
   IF (operation_var = 'UPDATE') THEN
 EOF
 
-if [ "changed" == "${MODE}" ]; then
+if [ "column" == "${MODE}" ]; then
   # Capture only the columns which have changed
   while IFS= read -r line; do
     echo $line | awk '
@@ -604,7 +634,7 @@ EOF
 
 # Capture application name if requested
 if [ ${CAPTURE_APPLICATION_NAME} -eq 1 ]; then
-  echo "      ,get_current_setting('application_name')"
+  echo "      ,pgauditor_get_setting('application_name')"
 fi
 
 # Iterate through the columns
@@ -630,7 +660,7 @@ EOF
 
 # Create trigger definitions
 cat <<EOF
-CREATE TRIGGER ${INSERT_TRIGGER_NAME} AFTER INSERT ON ${TABLE} FOR EACH ROW EXECUTE PROCEDURE audit_${TABLE}_changes();
-CREATE TRIGGER ${UPDATE_TRIGGER_NAME} AFTER UPDATE ON ${TABLE} FOR EACH ROW EXECUTE PROCEDURE audit_${TABLE}_changes();
-CREATE TRIGGER ${DELETE_TRIGGER_NAME} AFTER DELETE ON ${TABLE} FOR EACH ROW EXECUTE PROCEDURE audit_${TABLE}_changes();
+CREATE TRIGGER ${INSERT_TRIGGER_NAME} AFTER INSERT ON ${SCHEMA}.${TABLE} FOR EACH ROW EXECUTE PROCEDURE ${SCHEMA}.audit_${TABLE}_changes();
+CREATE TRIGGER ${UPDATE_TRIGGER_NAME} AFTER UPDATE ON ${SCHEMA}.${TABLE} FOR EACH ROW EXECUTE PROCEDURE ${SCHEMA}.audit_${TABLE}_changes();
+CREATE TRIGGER ${DELETE_TRIGGER_NAME} AFTER DELETE ON ${SCHEMA}.${TABLE} FOR EACH ROW EXECUTE PROCEDURE ${SCHEMA}.audit_${TABLE}_changes();
 EOF

@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>pgauditor - PostgreSQL Audit Tool</title>
+    <style>
+        /* Basic reset */
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f0f0f0;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            background-color: #006581;
+            color: #fff;
+            padding: 20px;
+            text-align: center;
+        }
+
+        header h1 {
+            font-size: 36px;
+            margin-bottom: 10px;
+        }
+
+        header p {
+            font-size: 18px;
+        }
+
+        nav {
+            text-align: center;
+            margin-top: 20px;
+        }
+
+        nav ul {
+            list-style-type: none;
+            margin: 0;
+            padding: 0;
+        }
+
+        nav ul li {
+            display: inline-block;
+            margin-right: 10px;
+        }
+
+        nav ul li a {
+            color: #333;
+            text-decoration: none;
+            padding: 8px 12px;
+            background-color: #fff;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            display: block; /* Make links block-level */
+        }
+
+        nav ul li a:hover {
+            background-color: #f0f0f0; /* Change background color on hover */
+        }
+
+        .content {
+            padding: 20px;
+            background-color: #fff;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+
+        .content h2 {
+            margin-bottom: 10px;
+        }
+
+        .content p, .content pre {
+            margin-bottom: 10px;
+        }
+
+        .content pre {
+            background-color: #f4f4f4;
+            padding: 10px;
+            border-radius: 5px;
+            overflow-x: auto;
+        }
+
+        footer {
+            text-align: center;
+            margin-top: 20px;
+            color: #666;
+        }
+
+        .contact-info {
+            background-color: #f9f9f9;
+            border-radius: 8px;
+            padding: 10px;
+            margin-top: 10px;
+        }
+
+        .contact-info p {
+            margin-bottom: 10px;
+        }
+
+        .contact-info ul {
+            list-style-type: none;
+        }
+
+        .contact-info ul li {
+            margin-bottom: 10px;
+        }
+
+        .contact-info ul li a {
+            text-decoration: none;
+            color: #006581;
+        }
+
+        .contact-info ul li a:hover {
+            text-decoration: underline;
+        }
+        .download-info {
+            background-color: #f9f9f9;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+
+        .download-info p {
+            margin-bottom: 10px;
+        }
+
+        .download-info ol {
+            list-style-type: none; /* Remove default numbering */
+            padding-left: 20px; /* Add padding to align with text */
+        }
+
+        .download-info ol li {
+            margin-bottom: 10px;
+        }
+
+        .download-info ol li:before {
+            content: counter(list-item) ". "; /* Add numbering manually */
+            counter-increment: list-item; /* Increment counter */
+        }
+
+        .download-info ol li a {
+            text-decoration: none;
+            color: #006581;
+        }
+
+        .download-info ol li a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+<header>
+    <img src="postgresql.svg" alt="PostgreSQL Logo" height="100">
+    <h1>pgauditor - PostgreSQL Audit Tool</h1>
+    <p>Generate audit tables and trigger functions from a table name, capable of tracking what was changed, when it was changed, and who changed it</p>
+</header>
+<nav>
+    <ul>
+        <li><a href="#overview">Overview</a></li>
+        <li><a href="#how-it-works">How it works</a></li>
+        <li><a href="#connection-parameters">Connection parameters</a></li>
+        <li><a href="#usage">Usage</a></li>
+        <li><a href="#example">Example</a></li>
+        <li><a href="#about">About</a></li>
+        <li><a href="#download">Download</a></li>
+        <li><a href="#faq">FAQ</a></li>
+        <li><a href="#contact">Contact</a></li>
+    </ul>
+</nav>
+<div class="container">
+    <div class="content">
+        <h2 id="overview">Overview</h2>
+        <p>pgauditor is a single file bash script which generates audit tables and trigger functions for PostgreSQL. Its audit tables can collect who, what, where, and when. This approach can quickly be implemented within any PostgreSQL application.</p>
+
+        <h2 id="how-it-works">How it works</h2>
+        <p>pgauditor utilizes PostgreSQL trigger functions to intercept SQL statements and record changes made to the database. It captures information such as who made the change, what was changed, when the change occurred, and more.</p>
+
+        <h2 id="connection-parameters">Connection parameters</h2>
+        <p>Connect to your database by setting environment variables such as PGHOST, PGPORT, PGDATABASE, PGUSER, and PGPASSWORD.</p>
+        <pre><code># Connection parameters
+export PGHOST=localhost
+export PGPORT=5432
+export PGDATABASE=my_database
+export PGUSER=my_user
+export PGPASSWORD=my_password</code></pre>
+
+        <h2 id="usage">Usage</h2>
+        <p>To generate audit tables and trigger functions for a specific table, use the following command:</p>
+        <pre><code># Minimal configuration which accepts all defaults
+./pgauditor --table TABLE | psql</code></pre>
+        <p>Replace <code>TABLE</code> with the name of the table you want to audit.</p>
+
+        <h2 id="example">Example</h2>
+        <p>See an example of using pgauditor to audit changes made to a PostgreSQL table.</p>
+
+        <h3>Creating Audit Tables</h3>
+        <pre><code>./pgauditor --table inventory | psql</code></pre>
+
+        <h3>Viewing Audit Records</h3>
+        <p>After running the above command to create audit tables and trigger functions, you can view audit records by querying the audit table:</p>
+        <pre><code>select * from aud_inventory;</code></pre>
+
+        <h2 id="about">About</h2>
+        <p>Information about the pgauditor tool, its purpose, and the team behind it.</p>
+
+        <h2 id="download">Download</h2>
+        <div class="download-info">
+            <p>To download pgauditor, follow these steps:</p>
+            <ol>
+                <li>Visit the pgauditor repository on GitHub: <a href="https://github.com/johndunlap/pgauditor" target="_blank">https://github.com/johndunlap/pgauditor</a></li>
+                <li>Click on the green "Code" button near the top-right corner of the page.</li>
+                <li>Choose either "Download ZIP" to download the repository as a ZIP file, or copy the repository URL if you prefer to clone it using Git.</li>
+                <li>Extract the ZIP file (if downloaded) to your desired location.</li>
+            </ol>
+        </div>
+<!--
+        <h2 id="faq">FAQ</h2>
+        <p>Frequently asked questions and answers about the pgauditor tool.</p>
+-->
+
+        <h2 id="contact">Contact</h2>
+        <div class="contact-info">
+            <p>For support, inquiries, or feedback, please reach out:</p>
+            <ul>
+                <li><a href="https://github.com/johndunlap/pgauditor" target="_blank">Submit issues on GitHub</a></li>
+                <li>Contact John Dunlap via email: <a href="mailto:john.david.dunlap@gmail.com">john.david.dunlap@gmail.com</a></li>
+            </ul>
+        </div>
+    </div>
+</div>
+<footer>
+    &copy; 2024 John Dunlap. All rights reserved.
+</footer>
+</body>
+</html>
