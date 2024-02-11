@@ -108,6 +108,10 @@ Options:
 EOF
 )
 
+# TODO: Support auditing specific columns
+#   -c, --columns=[<COLUMNs>]   A comma separated list of columns names which
+#                               should be audited. The default is all columns.
+
 # TODO: Support row level auditing
 #   -m, --mode=[${SUPPORTED_MODES}]     The audit mode which should be used. In row mode,
 #                               the entire row is captured when a change is made.
