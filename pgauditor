@@ -307,7 +307,8 @@ drop_function_if_exists() {
 # Check if the named table exists
 table_exists() {
   local table_name="$1"
-  psql -c "SELECT 1 FROM ${table_name} LIMIT 1" > /dev/null 2>&1
+  local schema_name="$2"
+  psql -c "SELECT 1 FROM ${schema_name}.${table_name} LIMIT 1" > /dev/null 2>&1
   return $?
 }
 
@@ -408,7 +409,7 @@ if ! enum_type_exists "${ENUM_TYPE_NAME}" "${SCHEMA}"; then
 fi
 
 # Determine if the audit table exists in Postgresql by audit table name
-if table_exists "${AUDIT_TABLE_NAME}"; then
+if table_exists "${AUDIT_TABLE_NAME}" "${SCHEMA}"; then
   # Add missing columns to existing audit table
   AUDIT_TABLE_COLUMNS=$(mktemp)
   
@@ -422,6 +423,7 @@ if table_exists "${AUDIT_TABLE_NAME}"; then
       data_type
   FROM information_schema.columns
   WHERE table_name = '${AUDIT_TABLE_NAME}'
+    AND table_schema = '${SCHEMA}'
     AND column_name not like 'old_%'
     AND column_name not in(
       'audit_id',
@@ -441,12 +443,12 @@ EOF
 
     grep "${line}" "${AUDIT_TABLE_COLUMNS}"> /dev/null 2>&1
     if [ $? -ne 0 ];then
-      echo "${line}" | awk -v AUDIT_TABLE_NAME="${AUDIT_TABLE_NAME}" '
+      echo "${line}" | awk -v AUDIT_TABLE_NAME="${AUDIT_TABLE_NAME}" -v SCHEMA="${SCHEMA}" '
         BEGIN{
           FS="|";
         }{
-          print "ALTER TABLE " AUDIT_TABLE_NAME " ADD COLUMN old_" $1 " " $2 ";";
-          print "ALTER TABLE " AUDIT_TABLE_NAME " ADD COLUMN new_" $1 " " $2 ";";
+          print "ALTER TABLE " SCHEMA "." AUDIT_TABLE_NAME " ADD COLUMN old_" $1 " " $2 ";";
+          print "ALTER TABLE " SCHEMA "." AUDIT_TABLE_NAME " ADD COLUMN new_" $1 " " $2 ";";
         }
       ' | cat
     fi
@@ -456,7 +458,7 @@ EOF
     # Add the application name column if it does not already exist
     grep "application_name|text" "${AUDIT_TABLE_COLUMNS}"> /dev/null 2>&1
     if [ $? -ne 0 ];then
-      echo "ALTER TABLE ${AUDIT_TABLE_NAME} ADD COLUMN application_name text;"
+      echo "ALTER TABLE ${SCHEMA}.${AUDIT_TABLE_NAME} ADD COLUMN application_name text;"
     fi
   fi
 else
@@ -500,7 +502,7 @@ DECLARE
   changed_by_var text := NULL;
   changed_at_var timestamp with time zone := current_timestamp;
 EOF
-echo "  operation_var ${ENUM_TYPE_NAME} := NULL;"
+echo "  operation_var ${SCHEMA}.${ENUM_TYPE_NAME} := NULL;"
 
 # Emit variables for both old and new values
 while IFS= read -r line; do
@@ -517,7 +519,7 @@ done < "${COLUMN_TMP_FILE}"
 cat <<EOF
   change_count INT := 0;
 BEGIN
-  operation_var=TG_OP::${ENUM_TYPE_NAME};
+  operation_var=TG_OP::${SCHEMA}.${ENUM_TYPE_NAME};
 
 EOF
 
@@ -604,7 +606,7 @@ cat <<EOF
   END IF;
 
   IF change_count > 0 THEN
-    INSERT INTO ${AUDIT_TABLE_NAME}(
+    INSERT INTO ${SCHEMA}.${AUDIT_TABLE_NAME}(
       audit_id
       ,operation
       ,changed_by
@@ -630,7 +632,7 @@ done < "${COLUMN_TMP_FILE}"
 
 cat <<EOF
     ) values(
-      nextval('${SEQUENCE_NAME}')
+      nextval('${SCHEMA}.${SEQUENCE_NAME}')
       ,operation_var
       ,changed_by_var
       ,changed_at_var

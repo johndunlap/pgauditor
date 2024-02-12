@@ -69,14 +69,14 @@ if [ $? -eq 0 ]; then
 fi
 
 function create_schema() {
-  schema_name="$1"
+  local schema_name="$1"
   psql <<EOF
   create schema ${schema_name};
 EOF
 }
 
 function create_person_table() {
-  table_schema="$1"
+  local table_schema="$1"
   psql <<EOF
   create table ${table_schema}.person (
     id bigserial primary key,
@@ -88,51 +88,121 @@ function create_person_table() {
 EOF
 }
 
+function create_database() {
+  local database_name="$1"
+  echo "Creating database \"${PGDATABASE}\""
+  createdb "${PGDATABASE}"
+}
+
+function drop_database() {
+  local database_name="$1"
+  echo "Dropping database \"${PGDATABASE}\""
+  dropdb "${PGDATABASE}"
+}
+
 # Begin writing unit tests
 echo "Running unit tests..."
 
-# Create the database
-echo "Creating database \"${PGDATABASE}\""
-createdb "${PGDATABASE}"
-
 # Drop the database on exit
 function on_exit() {
-  exit_status=$?
-  database_name="$1"
-  echo "Dropping database \"${database_name}\""
-  dropdb "${database_name}"
+  local exit_status=$?
+  local database_name="$1"
 
-  if [ ${exit_status} -eq 0 ];then
-    echo "SUCCESS: TESTS PASSED"
-  else
-    echo "ERROR: TESTS FAILED"
-  fi
+  # Just in case it was not dropped by the tests
+  drop_database "${database_name}" 1> /dev/null 2>&1
 
   exit ${exit_status}
+}
+
+function run() {
+  local test_name="$1"
+  shift
+  REMAINING_ARGS="$@"
+  LOG_FILE=$(mktemp)
+  "${test_name}" "${REMAINING_ARGS}" 1>"${LOG_FILE}" 2>&1
+  SUCCESS=$?
+
+  if [ ${SUCCESS} -eq 0 ]; then
+    echo "PASS: ${test_name} ${REMAINING_ARGS}"
+    rm -f "${LOG_FILE}"
+    return 0
+  else
+    cat "${LOG_FILE}"
+    echo "FAIL: ${test_name} ${REMAINING_ARGS}"
+    rm -f "${LOG_FILE}"
+    return 1
+  fi
+
+  return $SUCCESS
 }
 
 # Trap the exit signal to automatically drop the test database on exit
 trap 'on_exit ${PGDATABASE}' EXIT
 
-# Stop on error
-set -eu
+function test_create_audit_table() {
+  local schema_name="$1"
 
-create_schema "pgauditor"
-create_person_table "pgauditor"
+  create_database "${PGDATABASE}"
+  create_schema "pgauditor"
+  create_person_table "pgauditor"
 
-# Verify that the table was created
-psql -c "select * from pgauditor.person" 1> /dev/null
+  # Verify that the table was created
+  psql -c "select * from pgauditor.person" 1> /dev/null
 
-# Query the columns of the table from the information schema
-EXPECTED=$(psql -tc "select string_agg(g.column_name || ':' || g.data_type, ',') from (select column_name, data_type from information_schema.columns where table_name = 'person' order by column_name) g" | awk '{print $1}')
+  # Query the columns of the table from the information schema
+  ACTUAL=$(psql -tc "select string_agg(g.column_name || ':' || g.data_type, ',') from (select column_name, data_type from information_schema.columns where table_name = 'person' and table_schema = 'pgauditor' order by column_name) g" | sed 's/^\s*//g')
+  EXPECTED='email:text,first_name:text,id:bigint,last_name:text,phone:text'
 
-if [ "${EXPECTED}" == 'email:text,first_name:text,id:bigint,last_name:text,phone:text' ]; then
-  echo "OK: Found expected columns"
-else
-  echo "ERROR: Did not find expected columns"
-  exit 1
-fi
+  if [ "${ACTUAL}" == "${EXPECTED}" ]; then
+    echo "OK: Found expected columns"
+  else
+    echo "ERROR: Did not find expected columns"
+    return 1
+  fi
 
+  SQL=$(./pgauditor --table pgauditor.person 2>/dev/null)
+  if [ $? -ne 0 ]; then
+    return 1
+  fi
 
-./pgauditor --table pgauditor.person | psql -v ON_ERROR_STOP=1
+  psql -c "${SQL}"
+  if [ $? -ne 0 ]; then
+    return 1
+  fi
+
+  # Query the columns of the table from the information schema
+  ACTUAL=$(psql -tc "select string_agg(g.column_name || ':' || g.data_type, ',') from (select column_name, data_type from information_schema.columns where table_name = 'aud_person' and table_schema = 'pgauditor' order by column_name) g" | sed 's/^\s*//g')
+  EXPECTED='audit_id:bigint,changed_at:timestamp with time zone,changed_by:text,new_email:text,new_first_name:text,new_id:bigint,new_last_name:text,new_phone:text,old_email:text,old_first_name:text,old_id:bigint,old_last_name:text,old_phone:text,operation:USER-DEFINED'
+
+  if [ "${ACTUAL}" == "${EXPECTED}" ]; then
+    echo "OK: Found expected columns"
+  else
+    echo -e "ERROR: Did not find expected columns: \n${EXPECTED}\n${ACTUAL}\n"
+    return 1
+  fi
+
+  drop_database "${PGDATABASE}"
+
+  if [ ${SUCCESS} -ne 0 ]; then
+    return 1
+  fi
+}
+
+function test_audit_update() {
+  local schema_name="$1"
+
+  set -eu
+
+  create_database "${PGDATABASE}"
+  create_schema "pgauditor"
+  create_person_table "pgauditor"
+
+  # Verify that the table was created
+  psql -c "select * from pgauditor.person" 1> /dev/null
+
+  set +eu
+}
+
+run test_create_audit_table "pgauditor"
+run test_create_audit_table "public"
 
