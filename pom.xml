@@ -21,6 +21,11 @@
       <version>0.12.0</version>
     </dependency>
     <dependency>
+      <groupId>org.voidzero</groupId>
+      <artifactId>influx-jdbc</artifactId>
+      <version>0.1.0-SNAPSHOT</version>
+    </dependency>
+    <dependency>
       <groupId>org.postgresql</groupId>
       <artifactId>postgresql</artifactId>
       <version>42.7.3</version>

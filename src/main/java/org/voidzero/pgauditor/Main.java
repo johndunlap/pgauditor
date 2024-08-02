@@ -8,5 +8,6 @@ public class Main {
         Configuration configuration = (Configuration) cli.bindOrExit(Configuration.class, args);
         PgAuditor pgAuditor = new PgAuditor(configuration);
         pgAuditor.run();
+        System.out.println(pgAuditor);
     }
 }
