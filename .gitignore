@@ -1,5 +1,5 @@
 /pg-audit.iml
 /.idea/
-/tmp.txt
-/tmp.sql
+/tmp*
 /target
+/dependency-reduced-pom.xml
