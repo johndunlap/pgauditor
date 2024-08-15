@@ -155,7 +155,7 @@ public class PgAuditor implements Runnable {
                 "        AND n.nspname = ?" +
                 "  );";
 
-        boolean exists = connection.fetchBoolean(
+        boolean exists = connection.getBoolean(
                 query,
                 triggerName,
                 tableName,
@@ -192,7 +192,7 @@ public class PgAuditor implements Runnable {
                 "        and n.nspname = ? " +
                 "  );";
 
-        return connection.fetchBoolean(
+        return connection.getBoolean(
                 query,
                 functionName,
                 schemaName
@@ -207,7 +207,7 @@ public class PgAuditor implements Runnable {
                 "            AND schemaname = ? " +
                 "    );";
 
-        return connection.fetchBoolean(
+        return connection.getBoolean(
                 query,
                 sequenceName,
                 schemaName
@@ -224,7 +224,7 @@ public class PgAuditor implements Runnable {
                 "        AND pn.nspname = ? " +
                 "  );";
 
-        return connection.fetchBoolean(
+        return connection.getBoolean(
                 query,
                 enumTypeName,
                 schemaName
