@@ -128,7 +128,7 @@ public class Configuration {
 
         if (index > 0) {
             schema = rawTable.substring(0, index);
-            tableOnly = rawTable.substring(index);
+            tableOnly = rawTable.substring(index + 1);
         } else {
             schema = "public";
             tableOnly = rawTable;

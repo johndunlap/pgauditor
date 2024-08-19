@@ -129,6 +129,7 @@ public class PgAuditor implements Runnable {
                     .append(config.getSchema())
                     .append(".")
                     .append(SETTINGS_FUNCTION_NAME)
+                    .append("(")
                     .append("name text) RETURNS TEXT\n")
                     .append("LANGUAGE plpgsql\n")
                     .append("  AS $BODY$\n")
