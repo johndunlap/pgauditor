@@ -60,7 +60,7 @@ public class Configuration {
             No argument required. When this flag is passed, the PostgreSQL application name will be captured in the \
             audit table. This is useful for identifying which application made the change. The default is to not \
             capture the application name.""")
-    private String applicationName;
+    private Boolean applicationName;
 
     @Arg(code = 'v', flag = "version", description = """
             Prints the version of PgAuditor and the version of its bundled JDBC driver""")
@@ -145,7 +145,7 @@ public class Configuration {
         return drop;
     }
 
-    public String getApplicationName() {
+    public Boolean getApplicationName() {
         return applicationName;
     }
 
