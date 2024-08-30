@@ -35,7 +35,11 @@ import static org.voidzero.influx.jdbc.InfluxConnection.connect;
  * it doesn't.
  */
 public class BaselineAuditTest {
+    /**
+     * Use TestContainers to spin up a Docker image of PostgreSQL to run the tests against.
+     */
     private static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16-alpine");
+
     /**
      * The SQL statement for creating the table which will be audited in tests.
      */
@@ -158,6 +162,36 @@ public class BaselineAuditTest {
             assertEquals(1L, values.get("new_id"));
             assertNull(values.get("old_username"));
             assertEquals("myuser", values.get("new_username"));
+
+            // Clean up after ourselves
+            connection.execute("delete from public.user");
+            connection.execute("delete from public.aud_user");
+        }
+    }
+
+    @Test
+    public void verifyUpdateWithSameValuesDoesNotCreateAnAuditRecord() throws SQLException {
+        try(InfluxConnection connection = connect(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())) {
+            // Insert a record and update it
+            connection.execute("insert into public.user(id, username) values(?, ?)", 1, "myuser");
+
+            // Verify the data
+            Map<String, Object> row = connection.getMap("select id, username from public.user where id = 1");
+            assertEquals(1L, row.get("id"));
+            assertEquals("myuser", row.get("username"));
+
+            connection.execute("update public.user set username = 'myuser' where id = ?", 1);
+
+            // Verify the data again to ensure that it hasn't changed
+            row = connection.getMap("select id, username from public.user where id = 1");
+            assertEquals(1L, row.get("id"));
+            assertEquals("myuser", row.get("username"));
+
+            // Verify the number of rows in the audit table
+            assertEquals(connection.getInteger("select count(*) from public.aud_user"), Integer.valueOf(1));
+
+            // Verify that the only audit record is an insert
+            assertEquals("INSERT", connection.getString("select operation from public.aud_user"));
 
             // Clean up after ourselves
             connection.execute("delete from public.user");

@@ -43,14 +43,36 @@ public class PgAuditor {
     private final Configuration config;
 
     /**
+     * This is taken from the {@link Configuration} object, but it is used frequently enough that it's worth only
+     * calling the getter once.
+     */
+    private final String schema;
+
+    /**
+     * This is taken from the {@link Configuration} object, but it is used frequently enough that it's worth only
+     * calling the getter once.
+     */
+    private final String table;
+
+    /**
      * The name of the generated audit table.
      */
     private final String auditTableName;
 
     /**
-     * The name of the function which is invoked by the audit triggers.
+     * The name of the function which is invoked by the audit triggers in response to sql insert statements.
      */
-    private final String auditFunctionName;
+    private final String insertAuditFunctionName;
+
+    /**
+     * The name of the function which is invoked by the audit triggers in response to sql update statements.
+     */
+    private final String updateAuditFunctionName;
+
+    /**
+     * The name of the function which is invoked by the audit triggers in response to sql delete statements.
+     */
+    private final String deleteAuditFunctionName;
 
     /**
      * The name of the trigger which will fire when a record is inserted into the specified table.
@@ -85,19 +107,33 @@ public class PgAuditor {
     public PgAuditor(final InfluxConnection connection, final Configuration config) {
         this.connection = connection;
         this.config = config;
-        this.auditTableName = "aud_" + config.getTableOnly();
-        this.insertTriggerName = this.auditTableName + "_insert_trigger";
-        this.updateTriggerName = this.auditTableName + "_update_trigger";
-        this.deleteTriggerName = this.auditTableName + "_delete_trigger";
-        this.auditFunctionName = "audit_" + config.getTableOnly() + "_changes";
+        this.table = config.getTableOnly();
+        this.schema = config.getSchema();
+        this.auditTableName = "aud_" + this.table;
+
+        /*
+         These names are, admittedly, cryptic but PostgreSQL limits the names of triggers and functions to 63 bytes,
+         so we need to keep these names as short as possible in case users need to audit tables with long names. They
+         are abbreviations of the following:
+         ati = Audit Trigger Insert
+         atu = Audit Trigger Update
+         atd = Audit Trigger Delete
+         afi = Audit Function Insert
+         afu = Audit Function Update
+         afd = Audit Function Delete
+        */
+        // TODO: Conditionally use readable names when the table name is sufficiently short
+        this.insertTriggerName = "ati_" + this.auditTableName;
+        this.updateTriggerName = "atu_" + this.auditTableName;
+        this.deleteTriggerName = "atd_" + this.auditTableName;
+        this.insertAuditFunctionName = "afi_" + this.table;
+        this.updateAuditFunctionName = "afu_" + this.table;
+        this.deleteAuditFunctionName = "afd_" + this.table;
     }
 
     public void run() throws SQLException {
-        // Gather metadata about the table which will be audited
-        TableMetadata tableMetadata = connection.getMetaData()
-                .getTable(config.getSchema(), config.getTableOnly());
-
-        dropTriggers(connection);
+        dropTriggers();
+        dropFunctions();
 
         if (config.getDrop()) {
             // We don't need to drop anything here because the triggers have already been dropped and tables, once
@@ -115,8 +151,6 @@ public class PgAuditor {
     }
 
     private void createTriggers() {
-        String schema = config.getSchema();
-        String table = config.getTableOnly();
         ddl.append("""
         CREATE TRIGGER %s AFTER INSERT ON %s.%s FOR EACH ROW EXECUTE PROCEDURE %s.%s();
         CREATE TRIGGER %s AFTER UPDATE ON %s.%s FOR EACH ROW EXECUTE PROCEDURE %s.%s();
@@ -126,17 +160,17 @@ public class PgAuditor {
                 schema,
                 table,
                 schema,
-                auditFunctionName,
+                insertAuditFunctionName,
                 updateTriggerName,
                 schema,
                 table,
                 schema,
-                auditFunctionName,
+                updateAuditFunctionName,
                 deleteTriggerName,
                 schema,
                 table,
                 schema,
-                auditFunctionName
+                deleteAuditFunctionName
         ));
     }
 
@@ -154,31 +188,283 @@ public class PgAuditor {
         return connection.getListMap(sql, table, schema);
     }
 
-    private void createAuditFunctions() throws SQLException {
-        String schema = config.getSchema();
-        String tableName = config.getTableOnly();
+    private void createInsertAuditFunction() throws SQLException {
+
         String authenticationCheck;
 
-        if (config.getAuthentication().equals(APPLICATION)) {
+        Authentication authentication = config.getAuthentication();
+
+        if (authentication.equals(APPLICATION)) {
             // This fragment is only necessary for APPLICATION authentication where the current user must be
             // identified by the client application prior to modifying the database
             authenticationCheck = """
                             SELECT INTO changed_by_var pgauditor_get_setting('%s');
                             IF changed_by_var is null or trim(changed_by_var) = '' THEN
-                                RAISE EXCEPTION 'Anonymous updates are not permitted for audited table %s.%s. To identify the user making the change run: SET [LOCAL] "%s"=<user>';
+                                RAISE EXCEPTION 'Anonymous updates are not permitted for audited table %s.%s. To identify the user making the change, pass a user id or username to the following query: SET [LOCAL] "%s"=<user>';
                             END IF;
                     """.formatted(
-                        AUTH_PROPERTY_NAME,
-                        schema,
-                        tableName,
-                        AUTH_PROPERTY_NAME
-                    );
-        } else if (config.getAuthentication().equals(DATABASE)) {
+                    AUTH_PROPERTY_NAME,
+                    schema,
+                    table,
+                    AUTH_PROPERTY_NAME
+            );
+        } else if (authentication.equals(DATABASE)) {
             authenticationCheck = "select into changed_by_var current_user;";
-        } else if (config.getAuthentication().equals(ANONYMOUS)) {
+        } else if (authentication.equals(ANONYMOUS)) {
             authenticationCheck = "";
         } else {
-            throw new RuntimeException("Unsupported authentication type: " + config.getAuthentication());
+            throw new RuntimeException("Unsupported authentication type: " + authentication);
+        }
+
+        StringBuilder columnDeclarations = new StringBuilder();
+        StringBuilder captureInserts = new StringBuilder();
+        StringBuilder insertColumnNames = new StringBuilder();
+        StringBuilder insertColumnValues = new StringBuilder();
+
+        Boolean applicationName = config.getApplicationName();
+
+        for (Map<String, Object> column : getColumns(schema, table)) {
+            String columnName = (String) column.get("column_name");
+            String columnType = (String) column.get("column_type");
+
+            columnDeclarations.append("""
+                old_%s_var %s := NULL;
+                new_%s_var %s := NULL;
+            """.formatted(
+                    columnName,
+                    columnType,
+                    columnName,
+                    columnType
+            ));
+
+            captureInserts.append("""
+                    new_%s_var := NEW.%s;
+            """.replaceAll("%s", columnName));
+
+            insertColumnNames.append("""
+                        ,old_%s
+                        ,new_%s
+            """.replaceAll("%s", columnName));
+
+            insertColumnValues.append("""
+                        ,old_%s_var
+                        ,new_%s_var
+            """.replaceAll("%s", columnName));
+        }
+
+        StringBuilder auditTableInsert = new StringBuilder("""
+                INSERT INTO %s.%s(
+                    audit_id
+                    ,operation
+                    ,changed_by
+                    ,changed_at
+        """.formatted(schema, auditTableName));
+
+        if (applicationName) {
+            auditTableInsert.append("            ,application_name\n");
+        }
+
+        auditTableInsert.append(insertColumnNames).append("""
+                ) values(
+                    nextval('%s.%s')
+                    ,'INSERT'
+                    ,changed_by_var
+                    ,changed_at_var
+        """.formatted(schema, SEQUENCE_NAME));
+
+        if (applicationName) {
+            auditTableInsert.append("            ,pgauditor_get_setting('application_name')\n");
+        }
+
+        auditTableInsert.append(insertColumnValues).append("        );\n");
+
+        // I'm not using a string builder here because it would make the audit function unreadable
+        String createTriggerFunction = """
+        \nCREATE OR REPLACE FUNCTION %s() RETURNS TRIGGER
+        AS
+        $BODY$
+        DECLARE
+            changed_by_var text := NULL;
+            changed_at_var timestamp with time zone := current_timestamp;
+        %s
+        BEGIN
+            %s
+            %S
+        %s
+            RETURN NULL;
+        END
+        $BODY$
+        LANGUAGE plpgsql VOLATILE;
+        """.formatted(
+                insertAuditFunctionName,
+                columnDeclarations.toString(),
+                authenticationCheck,
+                captureInserts.toString(),
+                auditTableInsert
+        );
+
+        ddl.append(createTriggerFunction);
+    }
+
+    private void createUpdateAuditFunction() throws SQLException {
+
+        String authenticationCheck;
+
+        Authentication authentication = config.getAuthentication();
+
+        if (authentication.equals(APPLICATION)) {
+            // This fragment is only necessary for APPLICATION authentication where the current user must be
+            // identified by the client application prior to modifying the database
+            authenticationCheck = """
+                            SELECT INTO changed_by_var pgauditor_get_setting('%s');
+                            IF changed_by_var is null or trim(changed_by_var) = '' THEN
+                                RAISE EXCEPTION 'Anonymous updates are not permitted for audited table %s.%s. To identify the user making the change, pass a user id or username to the following query: SET [LOCAL] "%s"=<user>';
+                            END IF;
+                    """.formatted(
+                    AUTH_PROPERTY_NAME,
+                    schema,
+                    table,
+                    AUTH_PROPERTY_NAME
+            );
+        } else if (authentication.equals(DATABASE)) {
+            authenticationCheck = "select into changed_by_var current_user;";
+        } else if (authentication.equals(ANONYMOUS)) {
+            authenticationCheck = "";
+        } else {
+            throw new RuntimeException("Unsupported authentication type: " + authentication);
+        }
+
+        StringBuilder columnDeclarations = new StringBuilder();
+        StringBuilder captureUpdates = new StringBuilder();
+        StringBuilder insertColumnNames = new StringBuilder();
+        StringBuilder insertColumnValues = new StringBuilder();
+
+        Boolean applicationName = config.getApplicationName();
+
+        for (Map<String, Object> column : getColumns(schema, table)) {
+            String columnName = (String) column.get("column_name");
+            String columnType = (String) column.get("column_type");
+
+            columnDeclarations.append("""
+                old_%s_var %s := NULL;
+                new_%s_var %s := NULL;
+            """.formatted(
+                    columnName,
+                    columnType,
+                    columnName,
+                    columnType
+            ));
+
+            // TODO: Use pg_version_num() to use "is distinct from" from PostgreSQL 9.1 onwards and the more verbose
+            //  backwards compatible way prior to 9.1
+            captureUpdates.append("""
+                    IF (OLD.%s is distinct from NEW.%s) THEN
+                        old_%s_var := OLD.%s;
+                        new_%s_var := NEW.%s;
+                        change_count := change_count + 1;
+                    END IF;
+            """.replaceAll("%s", columnName));
+
+            insertColumnNames.append("""
+                        ,old_%s
+                        ,new_%s
+            """.replaceAll("%s", columnName));
+
+            insertColumnValues.append("""
+                        ,old_%s_var
+                        ,new_%s_var
+            """.replaceAll("%s", columnName));
+        }
+
+        StringBuilder auditTableInsert = new StringBuilder("""
+                INSERT INTO %s.%s(
+                    audit_id
+                    ,operation
+                    ,changed_by
+                    ,changed_at
+        """.formatted(schema, auditTableName));
+
+        if (applicationName) {
+            auditTableInsert.append("            ,application_name\n");
+        }
+
+        auditTableInsert.append(insertColumnNames).append("""
+                ) values(
+                    nextval('%s.%s')
+                    ,'UPDATE'
+                    ,changed_by_var
+                    ,changed_at_var
+        """.formatted(schema, SEQUENCE_NAME));
+
+        if (applicationName) {
+            auditTableInsert.append("            ,pgauditor_get_setting('application_name')\n");
+        }
+
+        auditTableInsert.append(insertColumnValues).append("        );\n");
+
+        // I'm not using a string builder here because it would make the audit function unreadable
+        String createTriggerFunction = """
+        \nCREATE OR REPLACE FUNCTION %s() RETURNS TRIGGER
+        AS
+        $BODY$
+        DECLARE
+            changed_by_var text := NULL;
+            changed_at_var timestamp with time zone := current_timestamp;
+            operation_var %s.%s := NULL;
+            change_count INT := 0;
+        %s
+        BEGIN
+            operation_var=TG_OP::%s.%s;
+            %s
+        %s
+            IF change_count > 0 THEN
+        %s
+            END IF;
+            RETURN NULL;
+        END
+        $BODY$
+        LANGUAGE plpgsql VOLATILE;
+        """.formatted(
+                updateAuditFunctionName,
+                schema,
+                ENUM_TYPE_NAME,
+                columnDeclarations.toString(),
+                schema,
+                ENUM_TYPE_NAME,
+                authenticationCheck,
+                captureUpdates.toString(),
+                auditTableInsert
+        );
+
+        ddl.append(createTriggerFunction);
+    }
+
+    private void createDeleteAuditFunction() throws SQLException {
+
+        String authenticationCheck;
+
+        Authentication authentication = config.getAuthentication();
+
+        if (authentication.equals(APPLICATION)) {
+            // This fragment is only necessary for APPLICATION authentication where the current user must be
+            // identified by the client application prior to modifying the database
+            authenticationCheck = """
+                            SELECT INTO changed_by_var pgauditor_get_setting('%s');
+                            IF changed_by_var is null or trim(changed_by_var) = '' THEN
+                                RAISE EXCEPTION 'Anonymous updates are not permitted for audited table %s.%s. To identify the user making the change, pass a user id or username to the following query: SET [LOCAL] "%s"=<user>';
+                            END IF;
+                    """.formatted(
+                    AUTH_PROPERTY_NAME,
+                    schema,
+                    table,
+                    AUTH_PROPERTY_NAME
+            );
+        } else if (authentication.equals(DATABASE)) {
+            authenticationCheck = "select into changed_by_var current_user;";
+        } else if (authentication.equals(ANONYMOUS)) {
+            authenticationCheck = "";
+        } else {
+            throw new RuntimeException("Unsupported authentication type: " + authentication);
         }
 
         StringBuilder columnDeclarations = new StringBuilder();
@@ -188,7 +474,9 @@ public class PgAuditor {
         StringBuilder insertColumnNames = new StringBuilder();
         StringBuilder insertColumnValues = new StringBuilder();
 
-        for (Map<String, Object> column : getColumns(schema, tableName)) {
+        Boolean applicationName = config.getApplicationName();
+
+        for (Map<String, Object> column : getColumns(schema, table)) {
             String columnName = (String) column.get("column_name");
             String columnType = (String) column.get("column_type");
 
@@ -237,7 +525,7 @@ public class PgAuditor {
                     ,changed_at
         """.formatted(schema, auditTableName));
 
-        if (config.getApplicationName()) {
+        if (applicationName) {
             auditTableInsert.append("            ,application_name\n");
         }
 
@@ -249,7 +537,7 @@ public class PgAuditor {
                     ,changed_at_var
         """.formatted(schema, SEQUENCE_NAME));
 
-        if (config.getApplicationName()) {
+        if (applicationName) {
             auditTableInsert.append("            ,pgauditor_get_setting('application_name')\n");
         }
 
@@ -289,7 +577,7 @@ public class PgAuditor {
         $BODY$
         LANGUAGE plpgsql VOLATILE;
         """.formatted(
-                auditFunctionName,
+                deleteAuditFunctionName,
                 schema,
                 ENUM_TYPE_NAME,
                 columnDeclarations.toString(),
@@ -305,11 +593,15 @@ public class PgAuditor {
         ddl.append(createTriggerFunction);
     }
 
-    private void createAuditTable() throws SQLException {
-        String schema = config.getSchema();
+    private void createAuditFunctions() throws SQLException {
+        createInsertAuditFunction();
+        createUpdateAuditFunction();
+        createDeleteAuditFunction();
+    }
 
+    private void createAuditTable() throws SQLException {
         // Abort if the table already exists
-        if (tableExists(connection, config.getSchema(), auditTableName)) {
+        if (tableExists(connection, schema, auditTableName)) {
             // TODO: Replace this query with data taken from table metadata
             String missingColumnQuery = """
             SELECT
@@ -340,7 +632,7 @@ public class PgAuditor {
             WHERE table_name = '%s'
               AND table_schema = '%s'
             ORDER BY ordinal_position
-        """.formatted(config.getTableOnly(), schema);
+        """.formatted(table, schema);
 
         List<Map<String, Object>> columns = connection.getListMap(columnQuery);
 
@@ -372,9 +664,9 @@ public class PgAuditor {
     }
 
     private void createEnumType() throws SQLException {
-        if (!enumTypeExists(connection, config.getSchema(), ENUM_TYPE_NAME)) {
+        if (!enumTypeExists()) {
             ddl.append("CREATE TYPE ")
-                    .append(config.getSchema())
+                    .append(schema)
                     .append(".")
                     .append(ENUM_TYPE_NAME)
                     .append(" AS ENUM ('INSERT', 'UPDATE', 'DELETE');\n");
@@ -382,25 +674,31 @@ public class PgAuditor {
     }
 
     private void createSequence() throws SQLException {
-        if (!sequenceExists(connection, config.getSchema(), SEQUENCE_NAME)) {
+        if (!sequenceExists()) {
             ddl.append("CREATE SEQUENCE IF NOT EXISTS ")
-                    .append(config.getSchema())
+                    .append(schema)
                     .append(".")
                     .append(SEQUENCE_NAME)
                     .append(";\n");
         }
     }
 
-    private void dropTriggers(final InfluxConnection connection) throws SQLException {
-        dropTriggerIfExists(connection, insertTriggerName, config.getSchema(), config.getTableOnly());
-        dropTriggerIfExists(connection, updateTriggerName, config.getSchema(), config.getTableOnly());
-        dropTriggerIfExists(connection, deleteTriggerName, config.getSchema(), config.getTableOnly());
+    private void dropTriggers() throws SQLException {
+        dropTriggerIfExists(insertTriggerName);
+        dropTriggerIfExists(updateTriggerName);
+        dropTriggerIfExists(deleteTriggerName);
+    }
+
+    private void dropFunctions() throws SQLException {
+        dropFunctionIfExists(insertAuditFunctionName);
+        dropFunctionIfExists(updateAuditFunctionName);
+        dropFunctionIfExists(deleteAuditFunctionName);
     }
 
     private void createPgAuditorSettingFunction() throws SQLException {
-        if (!functionExists(connection, config.getSchema(), SETTINGS_FUNCTION_NAME)) {
+        if (!functionExists(connection, schema, SETTINGS_FUNCTION_NAME)) {
             ddl.append("CREATE OR REPLACE FUNCTION ")
-                    .append(config.getSchema())
+                    .append(schema)
                     .append(".")
                     .append(SETTINGS_FUNCTION_NAME)
                     .append("(")
@@ -419,7 +717,7 @@ public class PgAuditor {
         }
     }
 
-    private void dropTriggerIfExists(final InfluxConnection connection, final String triggerName, final String schemaName, final String tableName) throws SQLException {
+    private void dropTriggerIfExists(final String triggerName) throws SQLException {
         String query = "SELECT EXISTS ( " +
                 "      SELECT 1 " +
                 "      FROM pg_trigger trg " +
@@ -433,25 +731,25 @@ public class PgAuditor {
         boolean exists = connection.getBoolean(
                 query,
                 triggerName,
-                tableName,
-                schemaName
+                table,
+                schema
         );
 
         if (exists) {
             ddl.append("DROP TRIGGER IF EXISTS ")
                     .append(triggerName)
                     .append(" ON ")
-                    .append(schemaName)
+                    .append(schema)
                     .append(".")
-                    .append(tableName)
+                    .append(table)
                     .append(";\n");
         }
     }
 
-    private void dropFunctionIfExists(final InfluxConnection connection, final String schemaName, final String functionName) throws SQLException {
-        if (functionExists(connection, schemaName, functionName)) {
+    private void dropFunctionIfExists(final String functionName) throws SQLException {
+        if (functionExists(connection, schema, functionName)) {
             ddl.append("DROP FUNCTION IF EXISTS ")
-                    .append(schemaName)
+                    .append(schema)
                     .append(".")
                     .append(functionName)
                     .append(";\n");
@@ -474,7 +772,7 @@ public class PgAuditor {
         );
     }
 
-    private boolean sequenceExists(final InfluxConnection connection, final String schemaName, final String sequenceName) throws SQLException {
+    private boolean sequenceExists() throws SQLException {
         String query = "SELECT EXISTS ( " +
                 "        SELECT 1 " +
                 "        FROM pg_sequences " +
@@ -484,12 +782,12 @@ public class PgAuditor {
 
         return connection.getBoolean(
                 query,
-                sequenceName,
-                schemaName
+                SEQUENCE_NAME,
+                schema
         );
     }
 
-    private boolean enumTypeExists(final InfluxConnection connection, final String schemaName, final String enumTypeName) throws SQLException {
+    private boolean enumTypeExists() throws SQLException {
         String query = "SELECT EXISTS ( " +
                 "      SELECT 1 " +
                 "    FROM pg_type pt " +
@@ -501,8 +799,8 @@ public class PgAuditor {
 
         return connection.getBoolean(
                 query,
-                enumTypeName,
-                schemaName
+                ENUM_TYPE_NAME,
+                schema
         );
     }
 
