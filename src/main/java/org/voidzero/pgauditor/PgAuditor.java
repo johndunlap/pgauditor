@@ -1,6 +1,5 @@
 package org.voidzero.pgauditor;
 
-import org.voidzero.influx.jdbc.ColumnMetadata;
 import org.voidzero.influx.jdbc.InfluxConnection;
 import org.voidzero.influx.jdbc.TableMetadata;
 
@@ -111,7 +110,7 @@ public class PgAuditor {
         createSequence();
         createEnumType();
         createAuditTable();
-        createAuditFunction();
+        createAuditFunctions();
         createTriggers();
     }
 
@@ -155,7 +154,7 @@ public class PgAuditor {
         return connection.getListMap(sql, table, schema);
     }
 
-    private void createAuditFunction() throws SQLException {
+    private void createAuditFunctions() throws SQLException {
         String schema = config.getSchema();
         String tableName = config.getTableOnly();
         String authenticationCheck;
@@ -204,7 +203,7 @@ public class PgAuditor {
             ));
 
             captureUpdates.append("""
-                    IF ((OLD.%s IS NULL and NEW.%s IS NOT NULL) or (OLD.%s IS NOT NULL and NEW.%s IS NULL) or (OLD.%s != NEW.%s)) THEN
+                    IF (OLD.%s is distinct from NEW.%s) THEN
                         old_%s_var := OLD.%s;
                         new_%s_var := NEW.%s;
                         change_count := change_count + 1;
