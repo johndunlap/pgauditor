@@ -238,26 +238,26 @@ public class PgAuditor {
             ));
 
             captureInserts.append("""
-                    new_%s_var := NEW.%s;
+                new_%s_var := NEW.%s;
             """.replaceAll("%s", columnName));
 
             insertColumnNames.append("""
-                        ,old_%s
-                        ,new_%s
+                    ,old_%s
+                    ,new_%s
             """.replaceAll("%s", columnName));
 
             insertColumnValues.append("""
-                        ,old_%s_var
-                        ,new_%s_var
+                    ,old_%s_var
+                    ,new_%s_var
             """.replaceAll("%s", columnName));
         }
 
         StringBuilder auditTableInsert = new StringBuilder("""
-                INSERT INTO %s.%s(
-                    audit_id
-                    ,operation
-                    ,changed_by
-                    ,changed_at
+            INSERT INTO %s.%s(
+                audit_id
+                ,operation
+                ,changed_by
+                ,changed_at
         """.formatted(schema, auditTableName));
 
         if (applicationName) {
@@ -265,18 +265,18 @@ public class PgAuditor {
         }
 
         auditTableInsert.append(insertColumnNames).append("""
-                ) values(
-                    nextval('%s.%s')
-                    ,'INSERT'
-                    ,changed_by_var
-                    ,changed_at_var
+            ) values(
+                nextval('%s.%s')
+                ,'INSERT'
+                ,changed_by_var
+                ,changed_at_var
         """.formatted(schema, SEQUENCE_NAME));
 
         if (applicationName) {
             auditTableInsert.append("            ,pgauditor_get_setting('application_name')\n");
         }
 
-        auditTableInsert.append(insertColumnValues).append("        );\n");
+        auditTableInsert.append(insertColumnValues).append("    );\n");
 
         // I'm not using a string builder here because it would make the audit function unreadable
         String createTriggerFunction = """
@@ -286,10 +286,9 @@ public class PgAuditor {
         DECLARE
             changed_by_var text := NULL;
             changed_at_var timestamp with time zone := current_timestamp;
-        %s
-        BEGIN
+        %sBEGIN
             %s
-            %S
+        %s
         %s
             RETURN NULL;
         END
@@ -358,11 +357,11 @@ public class PgAuditor {
             // TODO: Use pg_version_num() to use "is distinct from" from PostgreSQL 9.1 onwards and the more verbose
             //  backwards compatible way prior to 9.1
             captureUpdates.append("""
-                    IF (OLD.%s is distinct from NEW.%s) THEN
-                        old_%s_var := OLD.%s;
-                        new_%s_var := NEW.%s;
-                        change_count := change_count + 1;
-                    END IF;
+                IF (OLD.%s is distinct from NEW.%s) THEN
+                    old_%s_var := OLD.%s;
+                    new_%s_var := NEW.%s;
+                    change_count := change_count + 1;
+                END IF;
             """.replaceAll("%s", columnName));
 
             insertColumnNames.append("""
@@ -410,12 +409,10 @@ public class PgAuditor {
         DECLARE
             changed_by_var text := NULL;
             changed_at_var timestamp with time zone := current_timestamp;
-            operation_var %s.%s := NULL;
             change_count INT := 0;
-        %s
-        BEGIN
-            operation_var=TG_OP::%s.%s;
+        %sBEGIN
             %s
+        
         %s
             IF change_count > 0 THEN
         %s
@@ -426,11 +423,7 @@ public class PgAuditor {
         LANGUAGE plpgsql VOLATILE;
         """.formatted(
                 updateAuditFunctionName,
-                schema,
-                ENUM_TYPE_NAME,
                 columnDeclarations.toString(),
-                schema,
-                ENUM_TYPE_NAME,
                 authenticationCheck,
                 captureUpdates.toString(),
                 auditTableInsert
@@ -468,8 +461,6 @@ public class PgAuditor {
         }
 
         StringBuilder columnDeclarations = new StringBuilder();
-        StringBuilder captureUpdates = new StringBuilder();
-        StringBuilder captureInserts = new StringBuilder();
         StringBuilder captureDeletes = new StringBuilder();
         StringBuilder insertColumnNames = new StringBuilder();
         StringBuilder insertColumnValues = new StringBuilder();
@@ -490,39 +481,27 @@ public class PgAuditor {
                     columnType
             ));
 
-            captureUpdates.append("""
-                    IF (OLD.%s is distinct from NEW.%s) THEN
-                        old_%s_var := OLD.%s;
-                        new_%s_var := NEW.%s;
-                        change_count := change_count + 1;
-                    END IF;
-            """.replaceAll("%s", columnName));
-
-            captureInserts.append("""
-                    new_%s_var := NEW.%s;
-            """.replaceAll("%s", columnName));
-
             captureDeletes.append("""
-                    old_%s_var := OLD.%s;
+                old_%s_var := OLD.%s;
             """.replaceAll("%s", columnName));
 
             insertColumnNames.append("""
-                        ,old_%s
-                        ,new_%s
+                    ,old_%s
+                    ,new_%s
             """.replaceAll("%s", columnName));
 
             insertColumnValues.append("""
-                        ,old_%s_var
-                        ,new_%s_var
+                    ,old_%s_var
+                    ,new_%s_var
             """.replaceAll("%s", columnName));
         }
 
         StringBuilder auditTableInsert = new StringBuilder("""
-                INSERT INTO %s.%s(
-                    audit_id
-                    ,operation
-                    ,changed_by
-                    ,changed_at
+            INSERT INTO %s.%s(
+                audit_id
+                ,operation
+                ,changed_by
+                ,changed_at
         """.formatted(schema, auditTableName));
 
         if (applicationName) {
@@ -530,18 +509,18 @@ public class PgAuditor {
         }
 
         auditTableInsert.append(insertColumnNames).append("""
-                ) values(
-                    nextval('%s.%s')
-                    ,operation_var
-                    ,changed_by_var
-                    ,changed_at_var
+            ) values(
+                nextval('%s.%s')
+                ,'DELETE'
+                ,changed_by_var
+                ,changed_at_var
         """.formatted(schema, SEQUENCE_NAME));
 
         if (applicationName) {
             auditTableInsert.append("            ,pgauditor_get_setting('application_name')\n");
         }
 
-        auditTableInsert.append(insertColumnValues).append("        );\n");
+        auditTableInsert.append(insertColumnValues).append("    );\n");
 
         // I'm not using a string builder here because it would make the audit function unreadable
         String createTriggerFunction = """
@@ -551,41 +530,18 @@ public class PgAuditor {
         DECLARE
             changed_by_var text := NULL;
             changed_at_var timestamp with time zone := current_timestamp;
-            operation_var %s.%s := NULL;
-        %s
-            change_count INT := 0;
-        BEGIN
-            operation_var=TG_OP::%s.%s;
+        %sBEGIN
             %s
-            IF (operation_var = 'UPDATE') THEN
         %s
-            ELSIF (operation_var = 'INSERT') THEN
         %s
-                change_count := change_count + 1;
-            ELSIF (operation_var = 'DELETE') THEN
-        %s
-                change_count := change_count + 1;
-            ELSE
-                raise exception 'Unknown operation: %%', operation_var;
-            END IF;
-
-            IF change_count > 0 THEN
-        %s
-            END IF;
             RETURN NULL;
         END
         $BODY$
         LANGUAGE plpgsql VOLATILE;
         """.formatted(
                 deleteAuditFunctionName,
-                schema,
-                ENUM_TYPE_NAME,
                 columnDeclarations.toString(),
-                schema,
-                ENUM_TYPE_NAME,
                 authenticationCheck,
-                captureUpdates.toString(),
-                captureInserts.toString(),
                 captureDeletes.toString(),
                 auditTableInsert
         );
